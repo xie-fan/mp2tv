@@ -143,7 +143,7 @@ node tools/fake-sender.mjs --device 2 stream ...
 - [ ] **M3** iOS 发送端（iOS 17+，ReplayKit 双采集路径）
 - [ ] **M4** iOS 旧系统兼容路径
 
-各里程碑的取舍理由见 `docs/adr/`。
+各里程碑的取舍理由见 `docs/adr/`；分版本验收清单见 `docs/testing.md`。
 
 ## 验证状态
 
