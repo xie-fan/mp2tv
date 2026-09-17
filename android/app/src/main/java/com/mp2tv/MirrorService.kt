@@ -160,15 +160,8 @@ class MirrorService : Service() {
         cropEnabled = getSharedPreferences("mp2tv", Context.MODE_PRIVATE)
             .getBoolean("smartCrop", true)
 
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        projection = mpm.getMediaProjection(resultCode, data)
-        projection!!.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                L.i("projection stopped")
-                stopAll("captureEnded")
-            }
-        }, handler)
-
+        // Android 14+ 要求：先 startForeground(MEDIA_PROJECTION) 再 getMediaProjection，
+        // 顺序反了会 SecurityException 闪退
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CH, "投屏", NotificationManager.IMPORTANCE_LOW)
@@ -179,6 +172,24 @@ class MirrorService : Service() {
         } else {
             startForeground(NOTIF_ID, notif)
         }
+
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val mp = try { mpm.getMediaProjection(resultCode, data) } catch (e: Throwable) {
+            L.i("getMediaProjection failed: $e"); null
+        }
+        if (mp == null) {
+            L.i("no projection, stopping")
+            status("录屏授权失败")
+            stopAll("noProjection")
+            return START_NOT_STICKY
+        }
+        projection = mp
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                L.i("projection stopped")
+                stopAll("captureEnded")
+            }
+        }, handler)
         getSystemService(DisplayManager::class.java)
             .registerDisplayListener(rotationListener, handler)
 
