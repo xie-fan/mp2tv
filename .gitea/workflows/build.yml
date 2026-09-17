@@ -3,6 +3,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
@@ -65,3 +66,36 @@ jobs:
         with:
           name: mp2tv-android-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  release:
+    # 仅 tag 推送时执行：下载两个构建产物，建 Release 并上传附件
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [windows, android]
+    runs-on: windows
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mp2tv-windows
+          path: dist-win
+      - uses: actions/download-artifact@v4
+        with:
+          name: mp2tv-android-debug
+          path: dist-android
+
+      - name: Create release and upload assets
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.server_url }}/api/v1
+          TOKEN: ${{ secrets.GITEA_TOKEN }}
+        run: |
+          $headers = @{ Authorization = "token $env:TOKEN" }
+          $body = @{ tag_name = $env:TAG; name = $env:TAG; target_commitish = 'main' } | ConvertTo-Json
+          $rel = Invoke-RestMethod -Method Post -Uri "$env:API/repos/$env:REPO/releases" -Headers $headers -ContentType 'application/json' -Body $body
+          Get-ChildItem dist-win -Filter *.exe | ForEach-Object {
+            Invoke-RestMethod -Method Post -Uri "$env:API/repos/$env:REPO/releases/$($rel.id)/assets?name=$($_.Name)" -Headers $headers -InFile $_.FullName -ContentType 'application/octet-stream'
+          }
+          Get-ChildItem dist-android -Filter *.apk | ForEach-Object {
+            Invoke-RestMethod -Method Post -Uri "$env:API/repos/$env:REPO/releases/$($rel.id)/assets?name=$($_.Name)" -Headers $headers -InFile $_.FullName -ContentType 'application/octet-stream'
+          }
