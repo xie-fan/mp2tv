@@ -164,7 +164,8 @@ class MirrorService : Service() {
         // 顺序反了会 SecurityException 闪退
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CH, "投屏", NotificationManager.IMPORTANCE_LOW)
+            // DEFAULT：LOW 在部分 ROM 会把通知折叠成一行，快捷按钮不可见
+            NotificationChannel(CH, "投屏", NotificationManager.IMPORTANCE_DEFAULT)
         )
         val notif = buildNotification("投到 ${d.name}")
         if (Build.VERSION.SDK_INT >= 29) {
@@ -483,7 +484,7 @@ class MirrorService : Service() {
 
     @Synchronized
     private fun startCapture() {
-        stopCapture()
+        stopEncoder()
         val (sw, sh) = targetSize()
         // encoder dims = content area in stream pixels (even, ≥64)
         val crop = if (cropEnabled) appliedCrop else null
@@ -506,24 +507,29 @@ class MirrorService : Service() {
         enc.start()
         encoder = enc
 
-        // GL bridge: VD -> OES texture -> (crop) -> encoder input surface
-        val pipe = GlPipe(encSurface, sw, sh)
-        if (crop != null) pipe.setCrop(crop.l, crop.t, crop.r, crop.b)
-        pipe.sampleListener = object : GlPipe.SampleListener {
-            override fun onSample(rgba: ByteArray, w: Int, h: Int) = onScreenSample(rgba, w, h)
+        // Android 14+：同一 MediaProjection 只允许 createVirtualDisplay 一次，
+        // 因此 VD + GL 桥整个会话只建一次；重建只换编码器输出面（setTarget）。
+        var pipe = glPipe
+        if (pipe == null || vd == null) {
+            pipe = GlPipe(sw, sh)
+            pipe.sampleListener = object : GlPipe.SampleListener {
+                override fun onSample(rgba: ByteArray, w: Int, h: Int) = onScreenSample(rgba, w, h)
+            }
+            glPipe = pipe
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+            vd = projection?.createVirtualDisplay(
+                "mp2tv", sw, sh, dm.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                pipe.inputSurface, null, handler
+            )
         }
-        glPipe = pipe
-
-        val dm = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
-        vd = projection?.createVirtualDisplay(
-            "mp2tv", sw, sh, dm.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            pipe.inputSurface, null, handler
-        )
+        pipe.setTarget(encSurface)
+        if (crop != null) pipe.setCrop(crop.l, crop.t, crop.r, crop.b)
+        else pipe.setCrop(0f, 0f, 1f, 1f)
         codecThread = Thread { drainEncoder(enc) }.also { it.start() }
-        startAudio()
+        if (audioThread == null) startAudio()
     }
 
     /** 黑边检测回调（GL 线程）：稳定 ~1s 的新内容区域才会生效（重建编码器） */
@@ -700,6 +706,20 @@ class MirrorService : Service() {
         }
     }
 
+    /** 只停编码器（重建用）；VD + GlPipe 保持，避免重复 createVirtualDisplay */
+    @Synchronized
+    private fun stopEncoder() {
+        encoder?.let {
+            try {
+                it.stop()
+                it.release()
+            } catch (_: Throwable) {
+            }
+        }
+        encoder = null
+        csd = null
+    }
+
     @Synchronized
     private fun stopCapture() {
         audioRec?.let {
@@ -710,19 +730,12 @@ class MirrorService : Service() {
             }
         }
         audioRec = null
+        audioThread = null
+        stopEncoder()
         vd?.release()
         vd = null
         glPipe?.release()
         glPipe = null
-        encoder?.let {
-            try {
-                it.stop()
-                it.release()
-            } catch (_: Throwable) {
-            }
-        }
-        encoder = null
-        csd = null
     }
 
     private fun stopAll(reason: String?) {

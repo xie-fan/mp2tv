@@ -9,7 +9,6 @@ import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
@@ -24,8 +23,12 @@ import java.util.concurrent.TimeUnit
  * Each incoming frame is drawn through an OES texture; a normalized crop rect
  * selects which part of the source reaches the encoder. A periodic 96x54
  * readback feeds the content-area detector.
+ *
+ * Android 14+ allows only ONE VirtualDisplay per MediaProjection, so this pipe
+ * (and its SurfaceTexture) lives for the whole session; only the encoder
+ * output surface is swapped via setTarget() on rebuild.
  */
-class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
+class GlPipe(srcW: Int, srcH: Int) {
 
     interface SampleListener {
         fun onSample(rgba: ByteArray, w: Int, h: Int)
@@ -44,7 +47,9 @@ class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
     private val h = Handler(thread.looper)
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
-    private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
+    private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE // encoder target
+    private var pbuf: EGLSurface = EGL14.EGL_NO_SURFACE // context home
+    private var eglCfg: EGLConfig? = null
     private var prog = 0
     private var aPos = -1
     private var aTex = -1
@@ -58,6 +63,8 @@ class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
     private val frameReady = java.util.concurrent.atomic.AtomicBoolean(false)
     private var frameCount = 0
     private var closed = false
+    private var outW0 = 0
+    private var outH0 = 0
 
     private val quad = floatBufferOf(
         -1f, -1f, 0f, 0f,
@@ -72,7 +79,7 @@ class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
         val latch = CountDownLatch(1)
         var surf: Surface? = null
         h.post {
-            eglInit(outSurface)
+            eglInit()
             st = SurfaceTexture(texId).also { t ->
                 t.setDefaultBufferSize(srcW, srcH)
                 t.setOnFrameAvailableListener({ frameReady.set(true) }, h)
@@ -90,12 +97,38 @@ class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
         cropL = l; cropT = t; cropR = r; cropB = b
     }
 
+    /** Rebind the encoder's input surface (rebuilds happen without touching the VD). */
+    fun setTarget(out: Surface) {
+        val latch = CountDownLatch(1)
+        h.post {
+            try {
+                EGL14.eglMakeCurrent(eglDisplay, pbuf, pbuf, eglContext)
+                if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                }
+                eglSurface = EGL14.eglCreateWindowSurface(
+                    eglDisplay, eglCfg, out, intArrayOf(EGL14.EGL_NONE), 0
+                )
+                EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+                val dim = IntArray(2)
+                EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, dim, 0)
+                EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, dim, 1)
+                outW0 = dim[0]; outH0 = dim[1]
+            } catch (e: Throwable) {
+                L.i("GlPipe.setTarget: $e")
+            }
+            latch.countDown()
+        }
+        latch.await(3, TimeUnit.SECONDS)
+    }
+
     fun release() {
         closed = true
         h.post {
             try {
                 st?.release()
                 if (eglSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                if (pbuf != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, pbuf)
                 if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext)
                 if (eglDisplay != EGL14.EGL_NO_DISPLAY) EGL14.eglTerminate(eglDisplay)
             } catch (_: Throwable) {
@@ -115,45 +148,47 @@ class GlPipe(outSurface: Surface, srcW: Int, srcH: Int) {
     private fun draw() {
         val t = st ?: return
         try {
-            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            // drain the frame even when no encoder target is bound
+            EGL14.eglMakeCurrent(eglDisplay, pbuf, pbuf, eglContext)
             t.updateTexImage()
             t.getTransformMatrix(texMtx)
-            GLES20.glViewport(0, 0, outW0, outH0)
-            drawQuad(texMtx, cropL, cropT, cropR, cropB)
-            EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, t.timestamp)
-            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            if (eglSurface != EGL14.EGL_NO_SURFACE) {
+                EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+                GLES20.glViewport(0, 0, outW0, outH0)
+                drawQuad(texMtx, cropL, cropT, cropR, cropB)
+                EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, t.timestamp)
+                EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+                EGL14.eglMakeCurrent(eglDisplay, pbuf, pbuf, eglContext)
+            }
             if (++frameCount % sampleEvery == 0) sampleDown()
         } catch (_: Throwable) {
         }
     }
 
-    private var outW0 = 0
-    private var outH0 = 0
-
-    private fun eglInit(out: Surface) {
+    private fun eglInit() {
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         val ver = IntArray(2)
         EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1)
         val cfgAttrs = intArrayOf(
             EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT, EGL14.EGL_NONE
+            EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT or EGL14.EGL_PBUFFER_BIT,
+            EGL14.EGL_NONE
         )
         val cfgs = arrayOfNulls<EGLConfig>(1)
         val n = IntArray(1)
         EGL14.eglChooseConfig(eglDisplay, cfgAttrs, 0, cfgs, 0, 1, n, 0)
+        eglCfg = cfgs[0]
         eglContext = EGL14.eglCreateContext(
-            eglDisplay, cfgs[0], EGL14.EGL_NO_CONTEXT,
+            eglDisplay, eglCfg, EGL14.EGL_NO_CONTEXT,
             intArrayOf(EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE), 0
         )
-        eglSurface = EGL14.eglCreateWindowSurface(
-            eglDisplay, cfgs[0], out, intArrayOf(EGL14.EGL_NONE), 0
+        // 1x1 pbuffer keeps the context current while no encoder is attached
+        pbuf = EGL14.eglCreatePbufferSurface(
+            eglDisplay, eglCfg,
+            intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE), 0
         )
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-        val dim = IntArray(2)
-        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, dim, 0)
-        EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, dim, 1)
-        outW0 = dim[0]; outH0 = dim[1]
+        EGL14.eglMakeCurrent(eglDisplay, pbuf, pbuf, eglContext)
 
         prog = buildProg(VS, FS)
         aPos = GLES20.glGetAttribLocation(prog, "aPos")
