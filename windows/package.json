@@ -1,13 +1,37 @@
 {
   "name": "mp2tv-windows",
   "version": "0.1.0",
+  "description": "mp2tv Windows receiver",
+  "author": "xiefan",
   "private": true,
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
-    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.mp2tv.receiver",
+    "productName": "mp2tv",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**",
+      "assets/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "portable": {
+      "artifactName": "mp2tv-${version}-portable.exe"
+    }
   },
   "dependencies": {
     "@peculiar/x509": "1.14.3",
@@ -18,6 +42,7 @@
     "@types/node": "24.5.2",
     "@types/qrcode": "1.5.5",
     "electron": "44.4.1",
+    "electron-builder": "26.16.1",
     "electron-vite": "5.0.0",
     "typescript": "5.9.2"
   }

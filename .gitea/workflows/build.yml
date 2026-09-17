@@ -31,11 +31,17 @@ jobs:
         working-directory: windows
         run: pnpm build
 
+      - name: Package portable exe
+        working-directory: windows
+        run: pnpm dist
+
       - name: Upload windows build
         uses: actions/upload-artifact@v4
         with:
           name: mp2tv-windows
-          path: windows/out/
+          path: |
+            windows/out/
+            windows/release/*.exe
 
   android:
     runs-on: windows

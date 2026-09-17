@@ -75,6 +75,7 @@ pnpm dev          # 开发模式（热更新）
 pnpm typecheck    # 类型检查
 pnpm build        # 生产构建到 out/
 npx electron .    # 直接跑生产构建
+pnpm dist         # 打绿色版 exe（electron-builder portable，输出到 release/）
 ```
 
 启动后主窗口显示配对二维码（5 分钟过期自动轮换），同时注册 `_mp2tv._tcp` mDNS 服务供手机发现。
