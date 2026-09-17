@@ -8,7 +8,18 @@
 - **Windows 接收端已实现并用假手机脚本联调通过**：证书/指纹/safeStorage 私钥、TLS 1.3 服务、分帧协议、配对二维码（5 分钟一次性）、mDNS、hello 鉴权（notPaired/busy/versionMismatch/receiverLocked）、心跳+10 秒重连宽限、投屏窗口（WebCodecs+SPS 改写+PCM 播放+控制条+断线浮层）、主窗口（二维码/设备列表/设置/导出日志）、托盘+关窗入托盘+开机自启
 - **Android 端已实现并通过 `assembleDebug`**：扫码配对（CameraX+ML Kit）、Keystore 加密 token、NSD 发现、TLS 指纹固定、MediaProjection+MediaCodec H.264+AudioPlaybackCapture 48k s16le、分帧发送+拥塞丢帧降码率、心跳+10 秒重连、旋转重建编码器、前台服务+停止通知
 - **真机联调还没做过**（手机 ↔ 电脑端到端）。验收清单见下文"待真机验证"和 `docs/spec.md` 第 7 节
-- 下一步：真机测 M1 → 修 bug → M2（智能截取/重力转正/强制旋转/音量处理/变暗不熄屏）
+- **M2 已实现（Android 端代码完成、`assembleDebug` 通过；接收端旋转闭环已本地验证）**：GL 裁剪管线、内容区域检测、重力转正、强制旋转循环、通知栏快捷按钮、音量归零/恢复、变暗不熄屏、导出日志、控制条旋转按钮
+- 下一步：真机测 M1+M2 → 修 bug → M3（iOS 27+）
+
+## M2 实现要点（2026-09-17）
+
+- `GlPipe.kt`：VD → SurfaceTexture(OES) → EGL → 编码器输入 Surface；裁剪 = 纹理坐标取子矩形；每 20 帧渲染一份 96×54 读回给黑边分析
+- `ContentDetect.kt`：逐行/列统计"点亮比例"（>12% 才算内容列），整帧均值过低视为暗场返回 null 保持现状
+- `MirrorService`：`appliedCrop` 稳定 3 个采样（~1s）才重建编码器（编码分辨率=内容区域原始像素，ADR 0004）；`forcedCycle` 0→1→2→3→0 循环；重力转正 = 竖屏界面 + 横拿≥1s（z 主导平放不算）+ 流里还有黑边；通知栏按钮=旋转/截取开关/停止；`SCREEN_DIM_WAKE_LOCK`（已弃用但功能符合"变暗不熄屏"）；`STREAM_MUSIC` 归零并在结束时恢复
+- 接收端：`rotation` 字段早就在 `drawFrame` 里旋转 canvas；新增 `btnRot` → `command:rotate` → 手机端推进循环（两端同一状态源在手机）
+- fake-sender：`--rotate N` 静态旋转 / `--rotateEvery s` 周期轮转；收到 `command:rotate` 自动轮转
+- 已验证（本地）：旋转按钮 → `command:rotate` → rotation 字段变化 → canvas 宽高互换（960×540↔540×960）
+- 待真机：GL 管线性能/耗电、黑边阈值在真实内容下的表现、重力转正方向是否反了（ax 符号→rotation 映射如反了改 `rotationField()` 里 1/3 对调）、音量归零后采集音量是否仍满、SCREEN_DIM 在国产 ROM 的行为
 
 ## 先读这些（按顺序）
 1. `CONTEXT.md`：术语
@@ -89,7 +100,7 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 
 ## M1 代码端还没验证的项
 - ~~锁屏拒绝（`receiverLocked`）~~：已验证，锁屏时 hello 返回 `{ok:false, reason:'receiverLocked'}`
-- 投屏窗口交互：静音/窗口模式/置顶/退出按钮、Esc、双击、控制条显隐——窗口已验证弹出、按钮 DOM 存在、画面渲染正确；按钮点击和键鼠行为需解锁屏幕后人工或自动化点一遍
+- ~~投屏窗口交互~~：已验证——经 CDP（`--remote-debugging-port=9223`）驱动 DOM 点过全部按钮：静音双向切换、置顶开/关、全屏/窗口切换、Esc 退全屏、双击进全屏、控制条 mousemove 唤醒 + 3s 自动隐藏、退出投屏关闭窗口且对端收到 `stop`
 - 二维码 5 分钟过期、一次性使用（轮换逻辑已测，完整 5 分钟过期未等满）
 - Android 端一切真机行为：扫码、NSD、投影授权、编码器 Annex B 输出、音频采集、旋转重建
 

@@ -87,6 +87,21 @@ class MainActivity : ComponentActivity() {
             setOnItemClickListener { _, _, pos, _ -> onDeviceClick(devices[pos]) }
             setOnItemLongClickListener { _, _, pos, _ -> onDeviceLongClick(devices[pos]); true }
         }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // 设置：智能截取默认开关 + 导出日志
+        val prefs = getSharedPreferences("mp2tv", Context.MODE_PRIVATE)
+        root.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(android.widget.CheckBox(this@MainActivity).apply {
+                text = "智能截取（默认开）"
+                isChecked = prefs.getBoolean("smartCrop", true)
+                setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("smartCrop", on).apply() }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(Button(this@MainActivity).apply {
+                text = "导出日志"
+                setOnClickListener { exportLog() }
+            })
+        })
         setContentView(root)
 
         MirrorService.listener = { msg -> runOnUiThread { statusText.text = msg; refresh() } }
@@ -213,6 +228,30 @@ class MainActivity : ComponentActivity() {
             }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    private fun exportLog() {
+        val f = L.file()
+        if (f == null || !f.exists()) {
+            toast("暂无日志")
+            return
+        }
+        Thread {
+            try {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, "mp2tv-log.txt")
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "text/plain")
+                }
+                val uri = contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+                )
+                contentResolver.openOutputStream(uri!!)?.use { it.write(f.readBytes()) }
+                runOnUiThread { toast("已导出到 下载/mp2tv-log.txt") }
+            } catch (e: Throwable) {
+                L.i("export log failed: $e")
+                runOnUiThread { toast("导出失败") }
+            }
+        }.start()
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()

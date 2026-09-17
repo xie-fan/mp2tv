@@ -15,6 +15,7 @@ const ctx2d = canvas.getContext('2d')!
 const bar = $('#bar')
 const overlay = $('#overlay')
 const btnMute = $('#btnMute') as HTMLButtonElement
+const btnRot = $('#btnRot') as HTMLButtonElement
 const btnMode = $('#btnMode') as HTMLButtonElement
 const btnPin = $('#btnPin') as HTMLButtonElement
 const btnStop = $('#btnStop') as HTMLButtonElement
@@ -166,6 +167,7 @@ btnMute.onclick = () => {
   player.setMuted(muted)
   refreshButtons()
 }
+btnRot.onclick = () => api.invoke('session:command', 'rotate')
 btnMode.onclick = () => api.invoke('window:toggleFullscreen')
 btnPin.onclick = () => {
   pinned = !pinned

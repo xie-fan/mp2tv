@@ -197,6 +197,9 @@ async function cmdStream() {
   const pcm = fs.existsSync(audioFile) ? fs.readFileSync(audioFile) : null
   console.log(`video AUs: ${aus.length}, audio: ${pcm ? pcm.length : 0} bytes`)
 
+  const rotate = parseInt(arg('rotate') ?? '0', 10) & 3 // --rotate N: rotation byte 0-3
+  const rotateEvery = parseFloat(arg('rotateEvery') ?? '0') // seconds; 0 = static
+
   const sock = await connect(dev.host, dev.port, dev.fp)
   const framer = new Framer()
   let helloed = false
@@ -209,12 +212,18 @@ async function cmdStream() {
         helloed = m.ok === true
       } else if (m.t === 'command') {
         console.log('command:', m)
+        if (m.action === 'rotate') curRot = (curRot + 1) & 3
       } else console.log('msg:', m)
     }
   })
   sock.on('close', () => console.log('disconnected'))
   sock.write(control({ t: 'hello', senderId: dev.senderId, token: dev.token, senderName: '假手机', v: 1 }))
   while (!helloed) await sleep(20)
+
+  let curRot = rotate
+  if (rotateEvery > 0) {
+    setInterval(() => { curRot = (curRot + 1) & 3; console.log('rotate ->', curRot) }, rotateEvery * 1000)
+  }
 
   const ping = setInterval(() => sock.write(control({ t: 'ping' })), 2000)
 
@@ -230,7 +239,7 @@ async function cmdStream() {
       const payload = Buffer.allocUnsafe(10 + au.data.length)
       payload.writeBigUInt64BE(BigInt(pts), 0)
       payload.writeUInt8(au.key ? 1 : 0, 8)
-      payload.writeUInt8(0, 9)
+      payload.writeUInt8(curRot, 9)
       au.data.copy(payload, 10)
       sock.write(frame(FRAME_VIDEO, payload))
       while (pcm && apts < pts + AU_US) {

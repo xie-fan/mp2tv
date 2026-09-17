@@ -8,10 +8,15 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.MediaCodec
@@ -20,6 +25,7 @@ import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.PowerManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -43,6 +49,8 @@ class MirrorService : Service() {
         private const val CH = "mirror"
         private const val NOTIF_ID = 1
         private const val ACTION_STOP = "stop"
+        private const val ACTION_ROTATE = "rotate"
+        private const val ACTION_CROP = "crop"
         private const val QUEUE_CAP = 256
         private const val PING_MS = 2000L
         private const val DEAD_MS = 6000L
@@ -75,6 +83,7 @@ class MirrorService : Service() {
     private var writer: Thread? = null
     private var audioThread: Thread? = null
     private var codecThread: Thread? = null
+    private var glPipe: GlPipe? = null
     private val queue = LinkedBlockingQueue<Triple<Int, ByteArray, Boolean>>(QUEUE_CAP)
     @Volatile
     private var stopping = false
@@ -83,6 +92,33 @@ class MirrorService : Service() {
     @Volatile
     private var sessionDead = false
     private var lastRotation = -1
+
+    // --- M2: smart crop ---
+    @Volatile
+    private var cropEnabled = true // session-scoped, default from settings
+    @Volatile
+    private var appliedCrop: ContentDetect.Rect? = null // null = full screen
+    private var pendingRect: ContentDetect.Rect? = null
+    private var pendingCount = 0
+    private var lastCropApply = 0L
+    @Volatile
+    private var latestDetected: ContentDetect.Rect? = null
+
+    // --- M2: smart rotation ---
+    // forcedCycle: 0=auto, 1/2/3 = forced clockwise-90° count (spec: press 4th returns to auto)
+    @Volatile
+    private var forcedCycle = 0
+    @Volatile
+    private var gravLandscape = false
+    @Volatile
+    private var gravSign = 0
+    private var gravSince = 0L
+    private var gravHoldSign = 0
+    private var sensorMgr: SensorManager? = null
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var audioManager: AudioManager? = null
+    private var prevVolume = -1
     private val handler = Handler(Looper.getMainLooper())
     private val rotationListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(id: Int) {}
@@ -100,9 +136,10 @@ class MirrorService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopAll("user")
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> { stopAll("user"); return START_NOT_STICKY }
+            ACTION_ROTATE -> { cycleForceRotate(); return START_NOT_STICKY }
+            ACTION_CROP -> { toggleCrop(); return START_NOT_STICKY }
         }
         if (running) return START_NOT_STICKY
         store = PairedStore(this)
@@ -114,6 +151,14 @@ class MirrorService : Service() {
         running = true
         stopping = false
         lastRotation = currentRotation()
+        forcedCycle = 0
+        appliedCrop = null
+        pendingRect = null
+        pendingCount = 0
+        latestDetected = null
+        gravLandscape = false
+        cropEnabled = getSharedPreferences("mp2tv", Context.MODE_PRIVATE)
+            .getBoolean("smartCrop", true)
 
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         projection = mpm.getMediaProjection(resultCode, data)
@@ -128,18 +173,7 @@ class MirrorService : Service() {
         nm.createNotificationChannel(
             NotificationChannel(CH, "投屏", NotificationManager.IMPORTANCE_LOW)
         )
-        val stopPi = PendingIntent.getService(
-            this, 0,
-            Intent(this, MirrorService::class.java).setAction(ACTION_STOP),
-            PendingIntent.FLAG_IMMUTABLE
-        )
-        val notif = Notification.Builder(this, CH)
-            .setContentTitle("mp2tv 正在投屏")
-            .setContentText("投到 ${d.name}")
-            .setSmallIcon(android.R.drawable.presence_video_online)
-            .addAction(Notification.Action.Builder(null, "停止投屏", stopPi).build())
-            .setOngoing(true)
-            .build()
+        val notif = buildNotification("投到 ${d.name}")
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -147,6 +181,23 @@ class MirrorService : Service() {
         }
         getSystemService(DisplayManager::class.java)
             .registerDisplayListener(rotationListener, handler)
+
+        // 投屏期间媒体音量归零（结束恢复）；屏幕只变暗不熄灭
+        audioManager = getSystemService(AudioManager::class.java)
+        audioManager?.let {
+            prevVolume = it.getStreamVolume(AudioManager.STREAM_MUSIC)
+            it.setStreamVolume(AudioManager.STREAM_MUSIC, 0, 0)
+        }
+        val pm = getSystemService(PowerManager::class.java)
+        @Suppress("DEPRECATION")
+        wakeLock = pm.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK, "mp2tv:dim")
+            .also { it.acquire() }
+
+        // 重力转正：加速度计
+        sensorMgr = getSystemService(SensorManager::class.java)
+        sensorMgr?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sensorMgr?.registerListener(gravityListener, it, SensorManager.SENSOR_DELAY_NORMAL)
+        }
 
         worker = Thread { sessionLoop() }.also { it.start() }
         return START_STICKY
@@ -156,15 +207,88 @@ class MirrorService : Service() {
         L.i("status: $s")
         listener?.invoke(s)
         handler.post {
-            getSystemService(NotificationManager::class.java).notify(
-                NOTIF_ID,
-                Notification.Builder(this, CH)
-                    .setContentTitle("mp2tv")
-                    .setContentText(s)
-                    .setSmallIcon(android.R.drawable.presence_video_online)
-                    .build()
-            )
+            getSystemService(NotificationManager::class.java)
+                .notify(NOTIF_ID, buildNotification(s))
         }
+    }
+
+    private fun buildNotification(text: String): Notification {
+        fun pi(action: String, req: Int) = PendingIntent.getService(
+            this, req, Intent(this, MirrorService::class.java).setAction(action),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val rotLabel = if (forcedCycle == 0) "旋转" else "旋转 ${forcedCycle * 90}°"
+        val cropLabel = if (cropEnabled) "截取:开" else "截取:关"
+        return Notification.Builder(this, CH)
+            .setContentTitle("mp2tv 正在投屏")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.presence_video_online)
+            .addAction(Notification.Action.Builder(null, rotLabel, pi(ACTION_ROTATE, 1)).build())
+            .addAction(Notification.Action.Builder(null, cropLabel, pi(ACTION_CROP, 2)).build())
+            .addAction(Notification.Action.Builder(null, "停止投屏", pi(ACTION_STOP, 0)).build())
+            .setOngoing(true)
+            .build()
+    }
+
+    // ---------- M2: rotation ----------
+
+    /** 强制旋转循环：0 auto -> 1(90°) -> 2(180°) -> 3(270°) -> 0 auto */
+    private fun cycleForceRotate() {
+        forcedCycle = (forcedCycle + 1) % 4
+        L.i("forceRotate cycle -> $forcedCycle")
+        status("投屏中")
+    }
+
+    private fun toggleCrop() {
+        cropEnabled = !cropEnabled
+        L.i("smartCrop -> $cropEnabled")
+        if (!cropEnabled) appliedCrop = null
+        pendingRect = null
+        pendingCount = 0
+        handler.post { rebuildCapture() }
+        status("投屏中")
+    }
+
+    private val gravityListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val ax = e.values[0]
+            val ay = e.values[1]
+            val az = e.values[2]
+            // 横着拿：重力主要在 x 轴；平放（z 主导）不算
+            val landscape = kotlin.math.abs(ax) > 6f &&
+                kotlin.math.abs(ax) > kotlin.math.abs(ay) &&
+                kotlin.math.abs(ax) > kotlin.math.abs(az)
+            val sign = if (ax > 0) 1 else -1
+            if (landscape && sign == gravHoldSign) {
+                if (!gravLandscape && SystemClock.elapsedRealtime() - gravSince > 1000) {
+                    gravLandscape = true
+                    gravSign = sign
+                    L.i("gravity landscape, sign=$sign")
+                }
+            } else {
+                gravSince = SystemClock.elapsedRealtime()
+                gravHoldSign = if (landscape) sign else 0
+                gravLandscape = false
+            }
+        }
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+    }
+
+    /** 当前流里是否还带着黑边（截取已生效的流没有黑边，无需重力转正） */
+    private fun streamHasBars(): Boolean {
+        val det = latestDetected ?: return false
+        val streamFull = appliedCrop?.isFull() ?: true
+        return streamFull && !det.isFull()
+    }
+
+    private fun gravityUpright(): Boolean =
+        forcedCycle == 0 && gravLandscape && currentRotation() == 0 && streamHasBars()
+
+    /** video header rotation byte: forced wins, else gravity upright, else 0 */
+    private fun rotationField(): Int = when {
+        forcedCycle != 0 -> forcedCycle
+        gravityUpright() -> if (gravSign > 0) 1 else 3
+        else -> 0
     }
 
     private fun sessionLoop() {
@@ -321,6 +445,7 @@ class MirrorService : Service() {
             }
             "command" -> when (msg.optString("action")) {
                 "keyframe" -> requestKeyframe()
+                "rotate" -> cycleForceRotate()
             }
         }
     }
@@ -348,8 +473,14 @@ class MirrorService : Service() {
     @Synchronized
     private fun startCapture() {
         stopCapture()
-        val (w, h) = targetSize()
-        L.i("capture ${w}x$h rot=$lastRotation")
+        val (sw, sh) = targetSize()
+        // encoder dims = content area in stream pixels (even, ≥64)
+        val crop = if (cropEnabled) appliedCrop else null
+        var w = if (crop == null) sw else (sw * (crop.r - crop.l)).toInt()
+        var h = if (crop == null) sh else (sh * (crop.b - crop.t)).toInt()
+        w = maxOf(64, w / 2 * 2)
+        h = maxOf(64, h / 2 * 2)
+        L.i("capture screen=${sw}x$sh enc=${w}x$h crop=$crop rot=$lastRotation")
         val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
@@ -360,19 +491,52 @@ class MirrorService : Service() {
         }
         val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val surface: Surface = enc.createInputSurface()
+        val encSurface: Surface = enc.createInputSurface()
         enc.start()
         encoder = enc
+
+        // GL bridge: VD -> OES texture -> (crop) -> encoder input surface
+        val pipe = GlPipe(encSurface, sw, sh)
+        if (crop != null) pipe.setCrop(crop.l, crop.t, crop.r, crop.b)
+        pipe.sampleListener = object : GlPipe.SampleListener {
+            override fun onSample(rgba: ByteArray, w: Int, h: Int) = onScreenSample(rgba, w, h)
+        }
+        glPipe = pipe
+
         val dm = DisplayMetrics()
         @Suppress("DEPRECATION")
         (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
         vd = projection?.createVirtualDisplay(
-            "mp2tv", w, h, dm.densityDpi,
+            "mp2tv", sw, sh, dm.densityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            surface, null, handler
+            pipe.inputSurface, null, handler
         )
         codecThread = Thread { drainEncoder(enc) }.also { it.start() }
         startAudio()
+    }
+
+    /** 黑边检测回调（GL 线程）：稳定 ~1s 的新内容区域才会生效（重建编码器） */
+    private fun onScreenSample(rgba: ByteArray, w: Int, h: Int) {
+        val r = ContentDetect.detect(rgba, w, h) ?: return // 暗场：保持现状
+        latestDetected = r
+        if (!cropEnabled) return
+        val pend = pendingRect
+        if (pend != null && r.similar(pend)) pendingCount++
+        else {
+            pendingRect = r
+            pendingCount = 1
+        }
+        val applied = appliedCrop
+        val changed = if (applied == null) !r.isFull() else !applied.similar(r, 0.02f)
+        if (changed && pendingCount >= 3 &&
+            SystemClock.elapsedRealtime() - lastCropApply > 2000
+        ) {
+            L.i("content rect -> ${r.l},${r.t} ${r.r}x${r.b}")
+            appliedCrop = r
+            pendingCount = 0
+            lastCropApply = SystemClock.elapsedRealtime()
+            handler.post { rebuildCapture() }
+        }
     }
 
     @Synchronized
@@ -415,7 +579,7 @@ class MirrorService : Service() {
                                 v = v shl 8
                             }
                             p[8] = (if (key) 1 else 0).toByte()
-                            p[9] = 0 // rotation: content is already pixel-rotated by the virtual display
+                            p[9] = rotationField().toByte() // 重力转正/强制旋转
                             au.copyInto(p, 10)
                             enqueue(Proto.FRAME_VIDEO, p, key)
                         }
@@ -537,6 +701,8 @@ class MirrorService : Service() {
         audioRec = null
         vd?.release()
         vd = null
+        glPipe?.release()
+        glPipe = null
         encoder?.let {
             try {
                 it.stop()
@@ -564,6 +730,23 @@ class MirrorService : Service() {
             stopCapture()
             projection?.stop()
             getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(rotationListener)
+            // 恢复媒体音量、释放亮屏锁、摘传感器
+            if (prevVolume >= 0) {
+                try {
+                    audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, prevVolume, 0)
+                } catch (_: Throwable) {
+                }
+                prevVolume = -1
+            }
+            try {
+                wakeLock?.release()
+            } catch (_: Throwable) {
+            }
+            wakeLock = null
+            try {
+                sensorMgr?.unregisterListener(gravityListener)
+            } catch (_: Throwable) {
+            }
             running = false
             stopSelf()
         }.start()
@@ -576,6 +759,20 @@ class MirrorService : Service() {
         projection?.stop()
         try {
             getSystemService(DisplayManager::class.java).unregisterDisplayListener(rotationListener)
+        } catch (_: Throwable) {
+        }
+        if (prevVolume >= 0) {
+            try {
+                audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, prevVolume, 0)
+            } catch (_: Throwable) {
+            }
+        }
+        try {
+            wakeLock?.release()
+        } catch (_: Throwable) {
+        }
+        try {
+            sensorMgr?.unregisterListener(gravityListener)
         } catch (_: Throwable) {
         }
         running = false
