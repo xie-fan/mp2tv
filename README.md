@@ -25,6 +25,11 @@ mp2tv/
 │   └── src/renderer/ #   渲染层：主窗口 UI + 投屏窗口（WebCodecs 解码）
 ├── android/          # 手机端：Kotlin + Gradle Wrapper
 │   └── app/src/main/ #   扫码配对、NSD 发现、MediaProjection 编码发送
+├── ios/              # 手机端：Swift + XcodeGen（iOS 27+ ScreenCaptureKit 路线）
+│   ├── project.yml   #   XcodeGen 工程定义（App + 实时活动扩展）
+│   ├── mp2tv/        #   App：配对、发现、SCK 采集、VT 编码、会话状态机
+│   ├── shared/       #   App 与扩展共用：ActivityAttributes / Intents / CmdBus
+│   └── activity/     #   实时活动扩展（锁屏卡片 + 灵动岛快捷按钮）
 ├── tools/
 │   └── fake-sender.mjs  # 假手机联调脚本（无真机也能测接收端）
 ├── docs/
@@ -40,7 +45,8 @@ mp2tv/
 | 端 | 技术 |
 |---|---|
 | 电脑端 | Electron 44, TypeScript, electron-vite, WebCodecs（H.264 硬解）, AudioWorklet（PCM 播放）, Node TLS, bonjour-service（mDNS）, safeStorage（凭据加密） |
-| 手机端 | Kotlin, Android API 29+, CameraX + ML Kit（扫码）, Android Keystore（token 加密）, NSD（服务发现）, MediaProjection + MediaCodec（采集编码）, AudioPlaybackCapture（系统声音） |
+| Android 手机端 | Kotlin, Android API 29+, CameraX + ML Kit（扫码）, Android Keystore（token 加密）, NSD（服务发现）, MediaProjection + MediaCodec（采集编码）, AudioPlaybackCapture（系统声音） |
+| iOS 手机端 | Swift 5.9, iOS 17+（采集需 iOS 27+）, ScreenCaptureKit + SCContentSharingPicker（采集授权）, VideoToolbox（H.264）, AVAudioConverter（48k s16le）, Keychain（token）, NWBrowser/NWConnection（mDNS + TLS）, ActivityKit + AppIntents（实时活动快捷按钮） |
 
 ## 协议概览
 
@@ -94,6 +100,23 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 
 > 注意：手机和电脑必须在同一局域网；二维码包含电脑全部 IPv4 地址，手机会逐个尝试。
 
+### 手机端（iOS，需 iOS 27+）
+
+工程用 XcodeGen 生成，需要在 Mac 上构建：
+
+```bash
+brew install xcodegen          # 如未装
+cd ios
+xcodegen                       # 生成 mp2tv.xcodeproj
+open mp2tv.xcodeproj           # Xcode 27+ 打开，选真机 Run
+```
+
+- 免费开发者账号可签名装机（实时活动/扩展无需 App Groups）
+- 首次投屏弹系统录屏选择器（`SCContentSharingPicker`），选择器里选当前设备
+- 权限：相机（扫码）、本地网络 + Bonjour `_mp2tv._tcp`（发现）、实时活动
+- 投屏中锁屏出现实时活动卡片：旋转 / 截取 / 退出三个按钮；按电源键锁屏自动退出投屏
+- iOS 侧不做自动静音，首次投屏请手动调低媒体音量；建议把"自动锁定"设为"永不"（锁屏会结束投屏）
+
 ### 无真机联调（假手机）
 
 `tools/fake-sender.mjs` 是完整的协议实现，可以在没有 Android 手机时测试接收端全链路：
@@ -140,8 +163,8 @@ node tools/fake-sender.mjs --device 2 stream ...
 
 - [x] **M1** Windows 接收端 + Android 发送端（本仓库当前状态）
 - [x] **M2** 智能截取（去黑边）、智能旋转（跟随/重力转正/强制旋转）、快捷按钮、音量与亮屏处理 —— 代码完成，待真机验收
-- [ ] **M3** iOS 发送端（iOS 17+，ReplayKit 双采集路径）
-- [ ] **M4** iOS 旧系统兼容路径
+- [x] **M3** iOS 27+ 发送端（ScreenCaptureKit + 实时活动快捷按钮）—— 代码完成，**未编译**，需 Mac + Xcode 27 验证
+- [ ] **M4** iOS 17–26 兼容路径（ReplayKit 录屏扩展）
 
 各里程碑的取舍理由见 `docs/adr/`；分版本验收清单见 `docs/testing.md`。
 

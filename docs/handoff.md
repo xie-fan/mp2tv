@@ -135,3 +135,36 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 - iOS ReplayKit 的 App 声音格式（旧版本实测）— https://github.com/twilio/video-quickstart-ios/pull/419/files
 - WebCodecs：无 description 时按 Annex B；SPS 没声明 `max_num_reorder_frames` 会攒帧 — https://w3c.github.io/webcodecs/avc_codec_registration.html 、https://chromium.googlesource.com/chromium/src/+/main/media/gpu/h264_decoder.cc 、https://github.com/MicrosoftEdge/WebView2Feedback/issues/4099
 - Electron 当前稳定版 44.4.1（Chromium 152）— https://releases.electronjs.org/
+
+## M3 状态（iOS 27+ 发送端，2026-XX-XX）
+
+代码已写完，**未编译**（本机无 macOS/Xcode）。需在 Mac 上验证。
+
+### 结构
+
+- `ios/project.yml` — XcodeGen 工程定义：`mp2tv`（App，deploymentTarget 17.0）+ `Mp2tvActivity`（WidgetKit 扩展）。`cd ios && xcodegen` 生成 `mp2tv.xcodeproj`
+- `ios/mp2tv/` — App 源码：
+  - `Proto.swift` 分帧/`Net.swift` TLS+指纹固定/`Store.swift` Keychain+UserDefaults/`Discovery.swift` NWBrowser mDNS
+  - `Engine.swift` 会话状态机（idle/pairing/connecting/streaming/reconnecting），配对、hello、10s 重连窗、`command` 处理、`protectedDataWillBecomeUnavailable` 锁屏停止
+  - `Capture.swift`（iOS 27 限定）`SCContentSharingPicker` → `SCStream` → `VTCompressionSession` → Annex B；CIImage 裁剪；`capturesAudio` → `AVAudioConverter` → 48k s16le stereo；每 20 帧回读 96×54 亮度图给截取检测
+  - `ContentDetect.swift` Android 同名算法移植（阈值一致）、`Rotation.swift` 强制循环 + 重力转正（CMMotionManager）
+  - `LiveAct.swift` 实时活动管理、`Log.swift` 文件日志
+  - `App.swift`/`ContentView.swift`/`ScanView.swift` SwiftUI（列表、扫码、设置、导出日志）
+- `ios/shared/` — App 与扩展共用：`ActivityAttributes.swift`、`Intents.swift`（`LiveActivityIntent`→App 进程执行，免费账号无需 App Groups）、`CmdBus.swift`（解耦扩展对 Engine 的引用）
+- `ios/activity/` — Widget 扩展：锁屏卡片 + 灵动岛，三个按钮
+
+### 实现决策
+
+- `Capture`/`PickerObs` 是 iOS 27 限定类型，Engine 用 `AnyObject` 擦除 + `@available` 计算属性持有，App 本身仍可在 iOS 17–26 跑配对/UI（为 M4 ReplayKit 留位）
+- token 存 Keychain（`WhenUnlockedThisDeviceOnly`），hello 时转 base64url 发送
+- 接收端 `command` 的字段名是 `action`（不是 `cmd`），值 `rotate`/`keyframe`
+- 停止时先发 `{t:'stop',reason:'user'}` 延迟 150ms 再关 socket，避免 cancel 丢帧
+
+### 待 Mac/真机验证（预期有编译错，逐个修）
+
+1. `SCContentSharingPicker.shared.present()`/observer 方法签名是否与 Xcode 27 SDK 一致
+2. `VTCompressionSession` C 回调、`CMVideoFormatDescriptionGetH264ParameterSetAtIndex` 签名
+3. `UIApplication.protectedDataWillBecomeUnavailable` 是否真在手动锁屏时触发（需设备设密码，数据保护开启）
+4. SCK 后台采集时 `CMMotionManager` 是否可读、`interfaceOrientation` 轮询是否有效
+5. Widget 扩展能否直接编译 `shared/`（LiveActivityIntent 在扩展 target 的可用性）
+6. 免费账号：App Groups 不用了，但实时活动本身免费账号是否可用待确认
