@@ -18,6 +18,12 @@ final class Rotation: NSObject {
     private(set) var forceCycle = 0 {
         didSet { onChange() }
     }
+
+    /// 恢复会话时的初始档位（录屏扩展从配置读）
+    func setForce(_ n: Int) {
+        let n = n % 4
+        if n != forceCycle { forceCycle = n }
+    }
     /// 流里是否还带着黑边（Engine 由截取检测器喂入）
     var streamHasBars = false
     /// 界面是否竖屏（Engine 定时刷新；SCK 后台时取最后已知值）

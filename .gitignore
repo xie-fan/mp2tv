@@ -18,3 +18,12 @@ android/.idea/
 tools/*.h264
 tools/*.pcm
 tools/fake-device*.json
+
+# ios（XcodeGen 生成物 + Xcode 构建产物）
+ios/mp2tv.xcodeproj/
+ios/*/Info.plist
+ios/*/*.entitlements
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/

@@ -168,3 +168,38 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 4. SCK 后台采集时 `CMMotionManager` 是否可读、`interfaceOrientation` 轮询是否有效
 5. Widget 扩展能否直接编译 `shared/`（LiveActivityIntent 在扩展 target 的可用性）
 6. 免费账号：App Groups 不用了，但实时活动本身免费账号是否可用待确认
+
+## M4 状态（iOS 17–26 ReplayKit 录屏扩展，2026-09-17）
+
+代码已写完，**未编译**。架构与 M3 不同：**扩展进程自持整条会话**。
+
+### 结构
+
+- `ios/broadcast/SampleHandler.swift` — `RPBroadcastSampleHandler`：读共享配置 → Conn 直连 + hello → 编码推流 → 心跳/10s 重连/命令轮询全在扩展内
+- `ios/shared/` — 现在三个 target 共用：`Proto/Net/Log/ContentDetect/Rotation/VTEnc/MediaUtil/PcmConv/CropCtl/IPC` + 原有的 ActivityAttributes/Intents/CmdBus
+- `ios/shared/IPC.swift` — App↔扩展 IPC：App Groups `UserDefaults(group.com.mp2tv.app)` 传会话配置和命令计数器 + Darwin 通知做信号（`com.mp2tv.cmd`/`com.mp2tv.state`）+ 1s 兜底轮询
+- `ios/mp2tv/BroadcastPicker.swift` — `RPSystemBroadcastPickerView`（preferredExtension 指向 broadcast target）
+
+### 设计决策
+
+- **扩展自持 socket**：帧不跨进程（每条帧 IPC 太贵），扩展直接用 Network.framework。App 在投屏前把 `SessionCfg`（含 token base64url）写进 group defaults，扩展读完、结束时 `IPC.clearSession()`
+- **token 不走 Keychain**：扩展读不到 App 的 Keychain（除非配 keychain-access-groups），退而求其次放 group 容器（自家进程可见）
+- **命令通道**：App 侧 CmdBus/按钮 → `IPC.sendRotate/sendToggleCrop/sendStop/sendKeyframe`（计数器 + Darwin 通知）；扩展侧收到 `command:rotate` 也能转（同一个 `rot.cycle()`）
+- **重力转正**：扩展里跑 `CMMotionManager`（重力方向），`uiPortrait` 由 App 每 500ms 写进共享配置（扩展拿不到 UIApplication）
+- **编码器重构**：`VTEnc`（VT session + AVCC→AnnexB）、`PcmConv`（音频重采样）、`FrameUtil`（亮度采样 + CIImage 裁剪）、`CropCtl`（防抖）抽到 shared/，M3 的 Capture 瘦身为纯 SCK 胶水层
+- **内存**：扩展内 processSampleBuffer 套 autoreleasepool，CIContext 关 cacheIntermediates
+- **App Groups 是硬依赖**：免费账号能否签出 `application-groups` 待真机实测；不行的话回退方案见下
+
+### 若 App Groups 不可用（免费账号限制）的备选
+
+1. Darwin 通知不带 entitlement 仍可用（只能传信号），但配置/token 过不去 → 不可用单独成方案
+2. CFMessagePort 跨进程传配置（端口名注册在扩展进程）——能跑但实现复杂
+3. **最简回退**：旧路线下不做智能截取/重力转正，只留强制旋转命令（Darwin 通知足够）；会话配置让用户在扩展启动前用 App 内的"待投屏"状态 + Darwin 通知触发扩展直连**最后一次连接的接收端**——host/port/fp 不敏感可放非共享 UserDefaults？不行，扩展和 App 的 defaults 容器隔离。→ 死路，只能靠 App Groups 或 CFMessagePort。真机验证 App Groups 优先。
+
+### 待 Mac/真机验证（在 M3 清单基础上新增）
+
+7. App Groups entitlement 免费账号能否签名
+8. `RPSystemBroadcastPickerView.preferredExtension` 匹配 bundle id `com.mp2tv.app.broadcast`
+9. 扩展 50MB 内存上限下 VT + CIImage 是否超限
+10. Darwin 通知 App↔扩展双向可靠性（有 1s 兜底轮询保底）
+11. `broadcastFinished` 里 asyncAfter 150ms 发 stop 是否来得及（进程可能先被杀）

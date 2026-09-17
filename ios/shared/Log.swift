@@ -1,10 +1,13 @@
 import Foundation
 
-/// 简单文件日志：filesDir/mp2tv.log，UI 里可导出分享。
+/// 简单文件日志：mp2tv.log。优先写 App Group 容器（App 和录屏扩展共用一份日志），
+/// 不可用则退回各自沙盒 documents。
 enum L {
     private static var url: URL? = {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("mp2tv.log")
+        let dir = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: IPC.suiteName)
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        return dir?.appendingPathComponent("mp2tv.log")
     }()
     private static let fmt: DateFormatter = {
         let f = DateFormatter()

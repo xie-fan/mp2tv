@@ -39,10 +39,13 @@ final class Engine: NSObject, ObservableObject {
         set { pickerObsAny = newValue }
     }
     private var encW = 0, encH = 0
-    // 智能截取防抖
-    private var candRect: ContentDetect.Rect?
-    private var candCount = 0
-    private var curCrop: CGRect?
+    // 智能截取（防抖逻辑在共享 CropCtl）
+    private let crop = CropCtl()
+    // M4 旧路线状态
+    /// true = iOS < 27，走录屏扩展；扩展自持会话，App 只做配置/命令转发/状态展示
+    private(set) var legacyMode = false
+    private var extStateTok = 0
+    private var extPoll: Timer?
 
     private override init() {
         super.init()
@@ -51,6 +54,9 @@ final class Engine: NSObject, ObservableObject {
             DispatchQueue.main.async { self?.online = m }
         }
         disc.start()
+        if #available(iOS 27.0, *) { legacyMode = false } else { legacyMode = true }
+        crop.apply = { [weak self] r in self?.applyCropRect(r) }
+        crop.on = cropOn
         rot.onChange = { [weak self] in self?.rotChanged() }
         CmdBus.rotate = { [weak self] in self?.cycleRotate() }
         CmdBus.toggleCrop = { [weak self] in self?.toggleCrop() }
@@ -169,6 +175,7 @@ final class Engine: NSObject, ObservableObject {
 
     func toggle(_ d: PairedComputer) {
         if phase == .streaming || phase == .reconnecting { stop(userInitiated: true); return }
+        if phase == .connecting && legacyMode { stop(userInitiated: true); return } // 取消等待录屏
         guard phase == .idle else { return }
         dev = d
         startSession()
@@ -176,7 +183,10 @@ final class Engine: NSObject, ObservableObject {
 
     func stop(userInitiated: Bool) {
         stopping = true
-        if userInitiated, let c = conn {
+        if legacyMode {
+            IPC.sendStop() // 通知扩展退出投屏
+            teardown()
+        } else if userInitiated, let c = conn {
             c.sendControl(["t": "stop", "reason": "user"])
             // 让 stop 帧先发出去再关 socket
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
@@ -195,7 +205,9 @@ final class Engine: NSObject, ObservableObject {
         if #available(iOS 27.0, *) { cap?.stop(); cap = nil }
         rot.stop(); rot.reset()
         forceRot = 0
-        curCrop = nil; candRect = nil; candCount = 0
+        crop.reset()
+        extPoll?.invalidate(); extPoll = nil
+        if extStateTok != 0 { IPC.unobserve(extStateTok); extStateTok = 0 }
         if #available(iOS 16.2, *) { LiveAct.end() }
         phase = .idle
         stopping = false
@@ -203,17 +215,102 @@ final class Engine: NSObject, ObservableObject {
 
     private func startSession() {
         guard let d = dev else { return }
-        guard #available(iOS 27.0, *) else {
-            status = "需要 iOS 27+（旧版本走 M4 录屏扩展，未实现）"
-            return
-        }
-        guard Store.token(d.receiverId) != nil else {
+        guard let tok = Store.token(d.receiverId) else {
             status = "配对凭据缺失，请重新配对"; return
         }
         stopping = false
         phase = .connecting
-        status = "连接 \(d.name)…"
-        connectAndHello(d)
+        if #available(iOS 27.0, *) {
+            status = "连接 \(d.name)…"
+            connectAndHello(d)
+        } else {
+            startLegacy(d, token: tok)
+        }
+    }
+
+    // ---------- M4：录屏扩展路径（iOS 17–26） ----------
+
+    /// App 写好会话配置 → 用户点系统录屏按钮 -> 扩展自持会话。
+    /// App 只转发命令和展示扩展回写的状态。
+    private func startLegacy(_ d: PairedComputer, token: Data) {
+        let (host, port) = resolveHost(d)
+        IPC.clearSession()
+        IPC.writeSession(IPC.SessionCfg(
+            receiverId: d.receiverId, receiverName: d.name,
+            host: host, port: port,
+            fpB64: d.fpB64, tokenB64: b64url(token),
+            senderId: Store.senderId, senderName: UIDevice.current.name,
+            cropOn: cropOn, forceRot: 0))
+        IPC.writeUiPortrait(currentPortrait())
+        lastExtState = ""
+        status = "点下方录屏按钮开始"
+        watchExtState()
+        startUiPortraitWriter()
+    }
+
+    private func currentPortrait() -> Bool {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first
+        return scene?.interfaceOrientation.isPortrait ?? true
+    }
+
+    /// 旧路线下持续把界面方向写进共享配置（扩展里重力转正条件①用）
+    private func startUiPortraitWriter() {
+        uiTimer?.invalidate()
+        uiTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            IPC.writeUiPortrait(self.currentPortrait())
+        }
+    }
+
+    /// 订阅扩展回写的状态（Darwin 通知 + 1s 兜底轮询）
+    private func watchExtState() {
+        if extStateTok == 0 {
+            extStateTok = IPC.observe(IPC.nState) { [weak self] in
+                DispatchQueue.main.async { self?.applyExtState() }
+            }
+        }
+        extPoll?.invalidate()
+        extPoll = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.applyExtState()
+        }
+    }
+
+    private var lastExtState = ""
+
+    private func applyExtState() {
+        let s = IPC.extState()
+        guard s != lastExtState else { return }
+        lastExtState = s
+        switch s {
+        case "connecting":
+            phase = .connecting; status = "连接 \(dev?.name ?? "")…"
+        case "streaming":
+            phase = .streaming; status = "投屏中 → \(dev?.name ?? "")"
+        case "reconnecting":
+            phase = .reconnecting; status = "连接中断，重连中…"
+        case "idle":
+            if phase != .idle {
+                phase = .idle; status = "已退出投屏"
+                teardownLegacyUi()
+            }
+        default:
+            if s.hasPrefix("err:") {
+                phase = .idle
+                status = String(s.dropFirst(4))
+                teardownLegacyUi()
+            }
+        }
+        if phase == .streaming || phase == .reconnecting { updateLive() }
+        if phase == .idle, #available(iOS 16.2, *) { LiveAct.end() }
+    }
+
+    private func teardownLegacyUi() {
+        lastExtState = ""
+        extPoll?.invalidate(); extPoll = nil
+        if extStateTok != 0 { IPC.unobserve(extStateTok); extStateTok = 0 }
+        uiTimer?.invalidate(); uiTimer = nil
+        forceRot = 0
+        stopping = false
     }
 
     private func resolveHost(_ d: PairedComputer) -> (String, Int) {
@@ -394,30 +491,12 @@ final class Engine: NSObject, ObservableObject {
     // ---------- 智能截取 ----------
 
     private func onLuma(_ lum: [UInt8], w: Int, h: Int) {
-        guard cropOn else {
-            rot.streamHasBars = false
-            if curCrop != nil { applyCropRect(nil) }
-            return
-        }
-        guard let r = ContentDetect.detect(lum, w: w, h: h) else { return } // 暗场保持
-        rot.streamHasBars = r.hasBars
-        let target: ContentDetect.Rect? = r.isFull ? nil : r
-        if let t = target, let c = candRect, t.similar(c) {
-            candCount += 1
-        } else {
-            candRect = target; candCount = 1
-        }
-        if candCount >= 3 { // ~1s 稳定（每 20 帧采样 ≈ 3Hz）
-            candCount = 0
-            let cg = candRect?.cg
-            if (cg == nil) != (curCrop == nil) || cg != curCrop {
-                applyCropRect(cg)
-            }
-        }
+        crop.on = cropOn
+        crop.feed(lum, w: w, h: h)
+        rot.streamHasBars = crop.streamHasBars
     }
 
     private func applyCropRect(_ cg: CGRect?) {
-        curCrop = cg
         guard encW > 0 else { return }
         if #available(iOS 27.0, *) { cap?.applyCrop(cg, srcW: encW, srcH: encH) }
         L.i("crop -> \(String(describing: cg))")
@@ -425,15 +504,25 @@ final class Engine: NSObject, ObservableObject {
 
     func toggleCrop() {
         cropOn.toggle()
-        if !cropOn { applyCropRect(nil) }
+        if legacyMode {
+            IPC.sendToggleCrop()
+        } else {
+            crop.on = cropOn
+            if !cropOn { applyCropRect(nil) }
+        }
         updateLive()
     }
 
     // ---------- 旋转 ----------
 
     func cycleRotate() {
-        rot.cycle()
-        forceRot = rot.forceCycle
+        if legacyMode {
+            IPC.sendRotate()
+            forceRot = (forceRot + 1) % 4 // 扩展自持档位，这里只同步显示
+        } else {
+            rot.cycle()
+            forceRot = rot.forceCycle
+        }
         updateLive()
     }
 

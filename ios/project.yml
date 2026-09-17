@@ -29,6 +29,10 @@ targets:
         NSBonjourServices: [_mp2tv._tcp]
         UIBackgroundModes: [audio, screen-capture]
         NSSupportsLiveActivities: YES
+    entitlements:
+      path: mp2tv/mp2tv.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mp2tv.app]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mp2tv.app
@@ -51,5 +55,29 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mp2tv.app.activity
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+
+  Mp2tvBroadcast:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: broadcast
+      - path: shared
+    info:
+      path: broadcast/Info.plist
+      properties:
+        CFBundleDisplayName: mp2tv 录屏
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+    entitlements:
+      path: broadcast/broadcast.entitlements
+      properties:
+        com.apple.security.application-groups: [group.com.mp2tv.app]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mp2tv.app.broadcast
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic

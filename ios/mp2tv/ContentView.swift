@@ -19,6 +19,15 @@ struct ContentView: View {
                             engine.stop(userInitiated: true)
                         }
                     }
+                    if engine.legacyMode && engine.phase == .connecting {
+                        VStack(spacing: 8) {
+                            Text("点下方按钮选择 mp2tv 开始录屏")
+                                .font(.caption).foregroundStyle(.secondary)
+                            BroadcastPicker()
+                                .frame(width: 60, height: 60)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
                 }
 
                 Section("已配对的电脑") {
