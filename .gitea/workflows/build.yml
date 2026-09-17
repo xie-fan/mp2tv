@@ -93,7 +93,7 @@ jobs:
           $headers = @{ Authorization = "token $env:TOKEN" }
           $body = @{ tag_name = $env:TAG; name = $env:TAG; target_commitish = 'main' } | ConvertTo-Json
           $rel = Invoke-RestMethod -Method Post -Uri "$env:API/repos/$env:REPO/releases" -Headers $headers -ContentType 'application/json' -Body $body
-          Get-ChildItem dist-win -Filter *.exe | ForEach-Object {
+          Get-ChildItem dist-win -Recurse -Filter *.exe | ForEach-Object {
             Invoke-RestMethod -Method Post -Uri "$env:API/repos/$env:REPO/releases/$($rel.id)/assets?name=$($_.Name)" -Headers $headers -InFile $_.FullName -ContentType 'application/octet-stream'
           }
           Get-ChildItem dist-android -Filter *.apk | ForEach-Object {
