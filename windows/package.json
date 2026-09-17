@@ -1,0 +1,24 @@
+{
+  "name": "mp2tv-windows",
+  "version": "0.1.0",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit"
+  },
+  "dependencies": {
+    "@peculiar/x509": "1.14.3",
+    "bonjour-service": "1.4.4",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "24.5.2",
+    "@types/qrcode": "1.5.5",
+    "electron": "44.4.1",
+    "electron-vite": "5.0.0",
+    "typescript": "5.9.2"
+  }
+}

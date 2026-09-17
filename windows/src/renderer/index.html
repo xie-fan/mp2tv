@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>mp2tv</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { font-family: 'Microsoft YaHei', system-ui, sans-serif; padding: 20px; color: #1f2328; background: #f6f8fa; }
+    h1 { font-size: 18px; margin-bottom: 4px; }
+    .sub { color: #656d76; font-size: 12px; margin-bottom: 16px; }
+    .card { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px; margin-bottom: 14px; }
+    .card h2 { font-size: 14px; margin-bottom: 10px; }
+    #qr { display: block; margin: 0 auto; width: 220px; height: 220px; }
+    .hint { text-align: center; color: #656d76; font-size: 12px; margin-top: 8px; }
+    .row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; gap: 8px; }
+    button { padding: 4px 12px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; cursor: pointer; font-size: 13px; }
+    button:hover { background: #eaeef2; }
+    button.danger { color: #cf222e; }
+    select, input[type='text'] { padding: 4px 6px; border: 1px solid #d0d7de; border-radius: 6px; font-size: 13px; }
+    .empty { color: #8c959f; font-size: 13px; padding: 8px 0; }
+    #toast { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #1f883d; color: #fff; padding: 8px 16px; border-radius: 6px; font-size: 13px; display: none; }
+    .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta { color: #8c959f; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="toast"></div>
+  <h1>mp2tv</h1>
+  <div class="sub" id="whoami"></div>
+
+  <div class="card">
+    <h2>扫码配对</h2>
+    <img id="qr" alt="配对二维码" />
+    <div class="hint">用手机 App 扫码配对，二维码 5 分钟内有效</div>
+    <div class="hint"><button id="refreshQr">刷新二维码</button></div>
+  </div>
+
+  <div class="card">
+    <h2>已配对手机</h2>
+    <div id="devices"><div class="empty">暂无已配对手机</div></div>
+  </div>
+
+  <div class="card">
+    <h2>设置</h2>
+    <div class="row">
+      <span>全屏显示器</span>
+      <select id="displaySel"></select>
+    </div>
+    <div class="row">
+      <span>开机自启</span>
+      <input type="checkbox" id="autostart" />
+    </div>
+    <div class="row">
+      <span>日志</span>
+      <button id="exportLogs">导出日志</button>
+    </div>
+  </div>
+
+  <script type="module" src="./main/index.ts"></script>
+</body>
+</html>

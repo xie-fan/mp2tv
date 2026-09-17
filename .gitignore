@@ -1,0 +1,19 @@
+node_modules/
+out/
+dist/
+*.log
+*.tsbuildinfo
+
+# android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+*.keystore
+
+# dev tools artifacts
+tools/*.h264
+tools/*.pcm
+tools/fake-device*.json
