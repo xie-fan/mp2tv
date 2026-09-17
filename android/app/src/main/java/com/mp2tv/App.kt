@@ -7,6 +7,15 @@ class App : Application() {
         super.onCreate()
         ctx = this
         L.init(this)
+        // 未捕获异常写进日志文件，"导出日志"可拿到崩溃栈
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                L.i("CRASH ${t.name}: ${e.stackTraceToString()}")
+            } catch (_: Throwable) {
+            }
+            prev?.uncaughtException(t, e)
+        }
     }
 
     companion object {
