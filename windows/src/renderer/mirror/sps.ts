@@ -21,7 +21,10 @@ export function splitAnnexB(au: Uint8Array): Uint8Array[] {
     const start = starts[k]
     let end = k + 1 < starts.length ? starts[k + 1] : n
     // trim the start code + a leading zero_byte belonging to next start code
-    end -= end > start && au[end - 4] === 0 && au[end - 3] === 0 && au[end - 2] === 0 && au[end - 1] === 1 ? 4 : 3
+    // (the last NAL has no following start code — its payload must stay intact)
+    if (k + 1 < starts.length) {
+      end -= end > start && au[end - 4] === 0 && au[end - 3] === 0 && au[end - 2] === 0 && au[end - 1] === 1 ? 4 : 3
+    }
     if (end > start) nals.push(au.subarray(start, end))
   }
   return nals
@@ -75,6 +78,7 @@ class BitReader {
   u(n: number): number {
     let v = 0
     for (let i = 0; i < n; i++) {
+      if (this.pos >= this.buf.length * 8) throw new Error('SPS overrun')
       v = (v << 1) | ((this.buf[this.pos >> 3] >> (7 - (this.pos & 7))) & 1)
       this.pos++
     }

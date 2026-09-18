@@ -7,6 +7,12 @@ import android.net.nsd.NsdServiceInfo
 
 data class FoundReceiver(val id: String, val host: String, val port: Int)
 
+/** 当前 mDNS 发现的电脑，MainActivity 写入、MirrorService 连接时作候选地址。
+ *  注意：发现的地址可能是 VPN/虚拟网卡，只有连通过的地址才写进 PairedStore。 */
+object OnlineReceivers {
+    val map = java.util.concurrent.ConcurrentHashMap<String, FoundReceiver>()
+}
+
 class NsdDiscovery(
     ctx: Context,
     private val onFound: (FoundReceiver) -> Unit,

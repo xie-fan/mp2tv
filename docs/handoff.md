@@ -108,15 +108,6 @@ adb install app\build\outputs\apk\debug\app-debug.apk
 - 只用非 GPL 许可的库（用户要求）
 - Node 没有生成 X.509 证书的内置 API，需要选库；mDNS、二维码生成和扫描也一样
 
-## 待真机验证（按影响排序）
-1. WebCodecs 硬解改写 SPS 后是否还攒帧；不行就改 `prefer-software`
-2. Windows 上 Node 的 mDNS 和系统自带 mDNS 共用 5353 端口，手机能否稳定发现电脑
-3. Android：媒体音量调 0 后录到的声音是否仍是满音量（AOSP 源码推断，各厂商 ROM 可能不同）；Android 17 在后台恢复音量是否被系统忽略
-4. Android："变暗不熄屏"唤醒锁（`SCREEN_DIM_WAKE_LOCK` 已弃用）在国产 ROM 上是否有效、一碰是否立即变亮
-5. iOS 27 ScreenCaptureKit：锁屏行为、帧方向信息、后台能否读重力传感器、调低音量是否影响录到的声音
-6. iOS 旧路线：`RPVideoSampleOrientationKey` 跟随界面还是重力；扩展里能否读重力传感器；免费账号能否用 App Groups；约 50MB 内存上限
-7. 实时活动按钮（`LiveActivityIntent` 在 App 进程执行）转发给录屏扩展（App Groups + Darwin 通知）是否可靠
-
 ## 事实核查记录
 
 直接核对过 Apple 官方文档：

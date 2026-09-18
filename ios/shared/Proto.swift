@@ -4,6 +4,14 @@ import Foundation
 /// [type u8][length u32 BE][payload]
 enum Proto {
     static let version = 1
+
+    /// base64url 解码（容忍缺失的 = 填充——Data(base64Encoded:) 要求长度是 4 的倍数）
+    static func b64d(_ s: String) -> Data? {
+        var b = s.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while b.count % 4 != 0 { b.append("=") }
+        return Data(base64Encoded: b)
+    }
     static let frameControl: UInt8 = 1
     static let frameVideo: UInt8 = 2
     static let frameAudio: UInt8 = 3

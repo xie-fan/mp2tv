@@ -1,6 +1,7 @@
 {
   "name": "mp2tv-windows",
   "version": "0.1.0",
+  "packageManager": "pnpm@11.25.0",
   "description": "mp2tv Windows receiver",
   "author": "xiefan",
   "private": true,

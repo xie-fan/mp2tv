@@ -46,6 +46,9 @@ export class VideoPipeline {
         this.log(`decoder error: ${e.message}`)
         this.configured = false
         this.waitingKeyframe = true
+        // force reconfigure on the next keyframe — otherwise an unchanged
+        // spsKey would skip configure() and freeze the picture permanently
+        this.spsKey = ''
         this.onError?.()
       }
     })
@@ -64,18 +67,29 @@ export class VideoPipeline {
   feed(auIn: Uint8Array, key: boolean, ptsUs: number, rotation: number): void {
     const patched = ensureLowLatencySps(auIn)
     if (!patched) {
-      this.log('SPS rewrite failed; using as-is')
+      this.log('SPS rewrite failed; falling back to software decode')
     }
     const au = patched?.au ?? auIn
     // inspect SPS on every AU — a key AU may not contain it and a
     // non-key AU may carry it ahead of the keyframe
-    if (patched && patched.spsKey && patched.spsKey !== this.spsKey) {
-      this.spsKey = patched.spsKey
-      const sps = splitAnnexB(au).find((n) => nalType(n) === 7)
-      const codec = sps ? codecString(sps) : null
-      if (codec) {
-        this.codec = codec
-        this.configure()
+    const sps = splitAnnexB(au).find((n) => nalType(n) === 7)
+    if (sps) {
+      const key2 = Array.from(sps.subarray(0, Math.min(sps.length, 48)))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+      if (key2 !== this.spsKey) {
+        const codec = codecString(sps)
+        if (codec) {
+          this.spsKey = key2
+          this.codec = codec
+          // unpatchable SPS: hardware decoders would buffer frames — use software
+          if (patched === null) this.hardware = false
+          try {
+            this.configure()
+          } catch (e) {
+            this.log(`decoder configure failed: ${e}`)
+          }
+        }
       }
     }
     if (!this.decoder || !this.configured || this.codec === '') {

@@ -45,12 +45,24 @@ class PairingActivity : ComponentActivity() {
         )
         setContentView(root)
 
-        // 深链/手动入口：mp2tv://pair?... 直接配对，不启动相机
+        // 深链/手动入口：mp2tv://pair?... 先弹确认（任意网页都能触发，不能静默配对）
         val deepLink = intent?.data?.toString()
         if (deepLink != null && deepLink.startsWith("mp2tv://pair")) {
             handling = true
-            status.text = "正在配对…"
-            doPair(deepLink)
+            val u = Uri.parse(deepLink)
+            val name = u.getQueryParameter("n") ?: "电脑"
+            val host = u.getQueryParameter("h") ?: "?"
+            status.text = "等待确认…"
+            android.app.AlertDialog.Builder(this)
+                .setTitle("配对请求")
+                .setMessage("与电脑「$name」（$host）配对？")
+                .setPositiveButton("配对") { _, _ ->
+                    status.text = "正在配对…"
+                    doPair(deepLink)
+                }
+                .setNegativeButton("取消") { _, _ -> finish() }
+                .setOnCancelListener { finish() }
+                .show()
             return
         }
 
@@ -112,6 +124,12 @@ class PairingActivity : ComponentActivity() {
                         val r = tryPair(h, port, fpBytes, code)
                         if (r != null) {
                             if (r.optBoolean("ok")) {
+                                // receiverId 必须是证书指纹前 8 字节——伪造 id 会覆盖真电脑的凭据
+                                val expected = fpBytes.joinToString("") { "%02x".format(it) }.take(16)
+                                if (r.getString("receiverId") != expected) {
+                                    lastErr = "电脑身份校验失败"
+                                    break
+                                }
                                 finishOk(
                                     r.getString("receiverId"),
                                     r.optString("receiverName", name),

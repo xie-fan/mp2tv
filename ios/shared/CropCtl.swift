@@ -15,17 +15,20 @@ final class CropCtl {
     private var candCount = 0
     private var cur: CGRect?
 
-    /// 每 ~1/3s 喂一帧 96x54 亮度图
+    /// 每 ~1/3s 喂一帧 96x54 亮度图。检测与截取开关无关——截取关着也跑检测
+    ///（重力转正的"流里有黑边"判断的是手机原始画面，不是输出流）。
     func feed(_ lum: [UInt8], w: Int, h: Int) {
+        guard let r = ContentDetect.detect(lum, w: w, h: h) else { return } // 暗场保持
+        streamHasBars = r.hasBars
         guard on else {
-            streamHasBars = false
+            cand = nil; candCount = 0
             if cur != nil { cur = nil; apply(nil) }
             return
         }
-        guard let r = ContentDetect.detect(lum, w: w, h: h) else { return } // 暗场保持
-        streamHasBars = r.hasBars
         let target: ContentDetect.Rect? = r.isFull ? nil : r
-        if let t = target, let c = cand, t.similar(c) {
+        // 全屏（nil）也是合法候选：连续三次全屏要能把 cur 归位，
+        // 否则 nil 候选每次都重置计数、永远回不到全屏
+        if (target == nil) == (cand == nil) && (target == nil || target!.similar(cand!)) {
             candCount += 1
         } else {
             cand = target; candCount = 1

@@ -27,7 +27,6 @@ import org.json.JSONObject
 class MainActivity : ComponentActivity() {
     private lateinit var store: PairedStore
     private var devices = mutableListOf<PairedComputer>()
-    private val online = mutableMapOf<String, FoundReceiver>()
     private lateinit var adapter: DevAdapter
     private lateinit var statusText: TextView
     private var nsd: NsdDiscovery? = null
@@ -117,8 +116,8 @@ class MainActivity : ComponentActivity() {
         refresh()
         nsd = NsdDiscovery(
             this,
-            onFound = { r -> runOnUiThread { online[r.id] = r; store.updateAddress(r.id, r.host, r.port); refresh() } },
-            onLost = { id -> runOnUiThread { online.remove(id); refresh() } }
+            onFound = { r -> runOnUiThread { OnlineReceivers.map[r.id] = r; refresh() } },
+            onLost = { id -> runOnUiThread { OnlineReceivers.map.remove(id); refresh() } }
         ).also { it.start() }
     }
 
@@ -150,7 +149,7 @@ class MainActivity : ComponentActivity() {
             toast("电脑已解除配对，请重新扫码")
             return
         }
-        if (online[d.receiverId] == null) {
+        if (OnlineReceivers.map[d.receiverId] == null) {
             // mDNS 可能发现不到（模拟器 NAT、禁 mDNS 的网络），仍尝试直连已存地址
             toast("电脑不在线，尝试直连…")
         }
@@ -203,7 +202,7 @@ class MainActivity : ComponentActivity() {
         AlertDialog.Builder(this)
             .setMessage("解除与 ${d.name} 的配对？")
             .setPositiveButton("解除") { _, _ ->
-                val f = online[d.receiverId]
+                val f = OnlineReceivers.map[d.receiverId]
                 if (f != null) {
                     Thread {
                         try {
@@ -268,7 +267,7 @@ class MainActivity : ComponentActivity() {
                 addView(TextView(this@MainActivity).apply { textSize = 16f })
                 addView(TextView(this@MainActivity).apply { textSize = 12f })
             }
-            val on = online[d.receiverId]
+            val on = OnlineReceivers.map[d.receiverId]
             (ll.getChildAt(0) as TextView).text = if (d.invalid) "${d.name}（已失效）" else d.name
             (ll.getChildAt(1) as TextView).text =
                 if (on != null) "在线 · ${on.host}:${on.port}" else "离线 · ${d.lastHost}"

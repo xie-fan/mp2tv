@@ -41,6 +41,8 @@ final class Engine: NSObject, ObservableObject {
     private var encW = 0, encH = 0
     // 智能截取（防抖逻辑在共享 CropCtl）
     private let crop = CropCtl()
+    /// 会话级截取开关：快捷按钮只影响本次投屏（spec），默认设置走 cropOn
+    private var sessionCrop = true
     // M4 旧路线状态
     /// true = iOS < 27，走录屏扩展；扩展自持会话，App 只做配置/命令转发/状态展示
     private(set) var legacyMode = false
@@ -95,10 +97,7 @@ final class Engine: NSObject, ObservableObject {
         tryPairHosts(h.split(separator: ",").map(String.init), port: p, fp: fp, code: c, name: n)
     }
 
-    private func b64d(_ s: String) -> Data? {
-        Data(base64Encoded: s.replacingOccurrences(of: "-", with: "+")
-                              .replacingOccurrences(of: "_", with: "/"))
-    }
+    private func b64d(_ s: String) -> Data? { Proto.b64d(s) }
 
     private func b64url(_ d: Data) -> String {
         d.base64EncodedString()
@@ -133,9 +132,9 @@ final class Engine: NSObject, ObservableObject {
                 guard m["ok"] as? Bool == true,
                       let rid = m["receiverId"] as? String,
                       let tok64 = m["token"] as? String,
-                      let tok = Data(base64Encoded: tok64
-                        .replacingOccurrences(of: "-", with: "+")
-                        .replacingOccurrences(of: "_", with: "/"))
+                      let tok = Proto.b64d(tok64),
+                      // receiverId 必须是证书指纹前 8 字节——伪造 id 会覆盖真电脑凭据
+                      rid == String(fp.map { String(format: "%02x", $0) }.joined().prefix(16))
                 else {
                     let reason = m["reason"] as? String ?? "?"
                     self.phase = .idle
@@ -220,6 +219,7 @@ final class Engine: NSObject, ObservableObject {
         }
         stopping = false
         phase = .connecting
+        sessionCrop = cropOn
         if #available(iOS 27.0, *) {
             status = "连接 \(d.name)…"
             connectAndHello(d)
@@ -240,7 +240,7 @@ final class Engine: NSObject, ObservableObject {
             host: host, port: port,
             fpB64: d.fpB64, tokenB64: b64url(token),
             senderId: Store.senderId, senderName: UIDevice.current.name,
-            cropOn: cropOn, forceRot: 0))
+            cropOn: sessionCrop, forceRot: 0))
         IPC.writeUiPortrait(currentPortrait())
         lastExtState = ""
         status = "点下方录屏按钮开始"
@@ -491,7 +491,7 @@ final class Engine: NSObject, ObservableObject {
     // ---------- 智能截取 ----------
 
     private func onLuma(_ lum: [UInt8], w: Int, h: Int) {
-        crop.on = cropOn
+        crop.on = sessionCrop
         crop.feed(lum, w: w, h: h)
         rot.streamHasBars = crop.streamHasBars
     }
@@ -503,12 +503,17 @@ final class Engine: NSObject, ObservableObject {
     }
 
     func toggleCrop() {
-        cropOn.toggle()
-        if legacyMode {
-            IPC.sendToggleCrop()
+        if phase == .streaming || phase == .reconnecting {
+            // 投屏中：只影响本次会话（spec 快捷按钮语义）
+            sessionCrop.toggle()
+            if legacyMode {
+                IPC.sendToggleCrop()
+            } else {
+                crop.on = sessionCrop
+                if !sessionCrop { applyCropRect(nil) }
+            }
         } else {
-            crop.on = cropOn
-            if !cropOn { applyCropRect(nil) }
+            cropOn.toggle() // 未投屏：改的是默认设置
         }
         updateLive()
     }
@@ -552,8 +557,9 @@ final class Engine: NSObject, ObservableObject {
     private func updateLive() {
         guard #available(iOS 16.2, *) else { return }
         let s = phase == .reconnecting ? "重连中…" : "投屏中"
+        let effectiveCrop = (phase == .streaming || phase == .reconnecting) ? sessionCrop : cropOn
         LiveAct.update(receiverName: dev?.name ?? "", status: s,
-                       cropOn: cropOn, forceRot: forceRot)
+                       cropOn: effectiveCrop, forceRot: forceRot)
     }
 
     // ---------- 解除配对 ----------
@@ -596,10 +602,17 @@ private final class PickerObs: NSObject, SCContentSharingPickerObserver {
     func contentSharingPicker(_ picker: SCContentSharingPicker,
                               didCancelFor stream: SCStream?) {
         picker.isActive = false
-        Engine.shared.status = "已取消选择"
+        // hello 已经发出、会话挂着——取消选择必须退出，否则电脑端黑屏全屏
+        DispatchQueue.main.async {
+            Engine.shared.stop(userInitiated: false)
+            Engine.shared.status = "已取消选择"
+        }
     }
     func contentSharingPickerStartDidFailWithError(_ error: Error) {
         L.i("picker failed: \(error)")
-        Engine.shared.status = "录屏授权失败"
+        DispatchQueue.main.async {
+            Engine.shared.stop(userInitiated: false)
+            Engine.shared.status = "录屏授权失败"
+        }
     }
 }

@@ -61,12 +61,6 @@ function renderDevices(devices: PairedDevice[]): void {
     const meta = document.createElement('span')
     meta.className = 'meta'
     meta.textContent = d.platform
-    const rename = document.createElement('button')
-    rename.textContent = '改名'
-    rename.onclick = async () => {
-      const n = prompt('设备名', d.name)
-      if (n) renderDevices((await api.invoke('device:rename', d.senderId, n)) as PairedDevice[])
-    }
     const del = document.createElement('button')
     del.className = 'danger'
     del.textContent = '删除'
@@ -75,7 +69,7 @@ function renderDevices(devices: PairedDevice[]): void {
         renderDevices((await api.invoke('device:unpair', d.senderId)) as PairedDevice[])
       }
     }
-    row.append(name, meta, rename, del)
+    row.append(name, meta, del)
     box.append(row)
   }
 }

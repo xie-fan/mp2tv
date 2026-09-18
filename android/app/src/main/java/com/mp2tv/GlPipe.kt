@@ -97,6 +97,20 @@ class GlPipe(srcW: Int, srcH: Int) {
         cropL = l; cropT = t; cropR = r; cropB = b
     }
 
+    /** Match the SurfaceTexture buffer to a resized VirtualDisplay (rotation). */
+    fun resizeBuffer(w: Int, hgt: Int) {
+        val latch = CountDownLatch(1)
+        h.post {
+            try {
+                st?.setDefaultBufferSize(w, hgt)
+            } catch (e: Throwable) {
+                L.i("GlPipe.resizeBuffer: $e")
+            }
+            latch.countDown()
+        }
+        latch.await(3, TimeUnit.SECONDS)
+    }
+
     /** Rebind the encoder's input surface (rebuilds happen without touching the VD). */
     fun setTarget(out: Surface) {
         val latch = CountDownLatch(1)

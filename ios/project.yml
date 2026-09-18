@@ -18,6 +18,11 @@ targets:
     sources:
       - path: mp2tv
       - path: shared
+    dependencies:
+      - target: Mp2tvActivity
+        embed: true
+      - target: Mp2tvBroadcast
+        embed: true
     info:
       path: mp2tv/Info.plist
       properties:

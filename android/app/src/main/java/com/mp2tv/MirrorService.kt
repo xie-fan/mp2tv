@@ -136,7 +136,7 @@ class MirrorService : Service() {
                 appliedCrop = null
                 pendingRect = null
                 pendingCount = 0
-                handler.postDelayed({ rebuildCapture() }, 300)
+                handler.postDelayed({ resizeForRotation() }, 300)
             }
             lastRotation = r
         }
@@ -295,12 +295,8 @@ class MirrorService : Service() {
         override fun onAccuracyChanged(s: Sensor?, a: Int) {}
     }
 
-    /** 当前流里是否还带着黑边（截取已生效的流没有黑边，无需重力转正） */
-    private fun streamHasBars(): Boolean {
-        val det = latestDetected ?: return false
-        val streamFull = appliedCrop?.isFull() ?: true
-        return streamFull && !det.isFull()
-    }
+    /** 手机原始画面是否有黑边（与截取开关无关——截取后的侧画内容仍需转正） */
+    private fun streamHasBars(): Boolean = latestDetected?.isFull() == false
 
     private fun gravityUpright(): Boolean =
         forcedCycle == 0 && gravLandscape && currentRotation() == 0 && streamHasBars()
@@ -308,7 +304,8 @@ class MirrorService : Service() {
     /** video header rotation byte: forced wins, else gravity upright, else 0 */
     private fun rotationField(): Int = when {
         forcedCycle != 0 -> forcedCycle
-        gravityUpright() -> if (gravSign > 0) 1 else 3
+        // ax>0（左边朝下）时竖屏缓冲里的内容是顺时针转的，要逆时针转正 → 3
+        gravityUpright() -> if (gravSign > 0) 3 else 1
         else -> 0
     }
 
@@ -381,14 +378,39 @@ class MirrorService : Service() {
     }
 
     /**
+     * 依次尝试候选地址：上次连通地址优先，其次 mDNS 当前发现的地址
+     *（发现的可能是 VPN/虚拟网卡地址）。只有 hello 成功的地址才回写存储。
+     */
+    private fun connectAndHello(d: PairedComputer, token: ByteArray, timeoutMs: Int): Pair<Conn?, String?> {
+        val candidates = LinkedHashSet<Pair<String, Int>>()
+        candidates.add(d.lastHost to d.lastPort)
+        OnlineReceivers.map[d.receiverId]?.let { candidates.add(it.host to it.port) }
+        var lastReason = "transport"
+        for ((host, port) in candidates) {
+            val r = tryHello(d, token, host, port, timeoutMs)
+            if (r.first != null) {
+                if (host != d.lastHost || port != d.lastPort) {
+                    d.lastHost = host; d.lastPort = port
+                    store.updateAddress(d.receiverId, host, port)
+                }
+                return r
+            }
+            lastReason = r.second ?: "transport"
+            // 对方明确拒绝（busy/notPaired/…）时换地址重试没意义
+            if (r.second != "transport") break
+        }
+        return null to lastReason
+    }
+
+    /**
      * Connect, send hello, wait for helloResult. The reader thread started here keeps running
      * for the life of the connection.
      * Returns (conn, null) on success, (null, "transport") on network failure,
      * or (null, reason) when the receiver rejected.
      */
-    private fun connectAndHello(d: PairedComputer, token: ByteArray, timeoutMs: Int): Pair<Conn?, String?> {
+    private fun tryHello(d: PairedComputer, token: ByteArray, host: String, port: Int, timeoutMs: Int): Pair<Conn?, String?> {
         val c = try {
-            Conn(TlsClient.connect(d.lastHost, d.lastPort, d.fp(), timeoutMs))
+            Conn(TlsClient.connect(host, port, d.fp(), timeoutMs))
         } catch (e: Throwable) {
             L.i("connect failed: $e")
             return null to "transport"
@@ -496,7 +518,7 @@ class MirrorService : Service() {
         val (sw, sh) = targetSize()
 
         // Android 14+：同一 MediaProjection 只允许 createVirtualDisplay 一次，
-        // VD + GL 桥整个会话只建一次，尺寸固定为创建时的屏幕尺寸。
+        // VD + GL 桥整个会话只建一次；转屏走 resizeForRotation() 的 vd.resize()。
         var pipe = glPipe
         if (pipe == null || vd == null) {
             vdW = sw; vdH = sh
@@ -608,6 +630,32 @@ class MirrorService : Service() {
         startCapture()
     }
 
+    /**
+     * 物理转屏后把 VD 和 SurfaceTexture 调到新方向尺寸再重建编码器：
+     * Android 14+ 只禁止第二次 createVirtualDisplay，resize 是允许的。
+     * 比信箱化进旧缓冲更好——不损失分辨率。
+     */
+    @Synchronized
+    private fun resizeForRotation() {
+        if (stopping || conn == null) return
+        val (sw, sh) = targetSize()
+        val v = vd
+        if (v != null && (sw != vdW || sh != vdH)) {
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(dm)
+            try {
+                v.resize(sw, sh, dm.densityDpi)
+                glPipe?.resizeBuffer(sw, sh)
+                vdW = sw; vdH = sh
+                L.i("VD resized ${sw}x${sh}")
+            } catch (e: Throwable) {
+                L.i("VD resize failed: $e")
+            }
+        }
+        rebuildCapture()
+    }
+
     private fun drainEncoder(enc: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         while (true) {
@@ -690,7 +738,8 @@ class MirrorService : Service() {
                     .build()
                 audioRec = rec
                 rec.startRecording()
-                val chunk = ByteArray(19200)
+                // 20ms 一包（原 100ms）：目标端到端延迟 100–200ms
+                val chunk = ByteArray(3840)
                 var framesSent = 0L
                 val startNs = System.nanoTime()
                 while (!stopping) {
@@ -714,22 +763,50 @@ class MirrorService : Service() {
         }.also { it.start() }
     }
 
+    @Volatile
+    private var dropUntilKey = false
+    private var lastDropAt = 0L
+    private var lastBumpAt = 0L
+
     private fun enqueue(type: Int, payload: ByteArray, isKey: Boolean) {
         if (conn == null || stopping) return
-        if (!queue.offer(Triple(type, payload, isKey))) {
-            // congested: drop all non-key video frames, drop audio backlog, lower bitrate
-            val kept = ArrayList<Triple<Int, ByteArray, Boolean>>(QUEUE_CAP)
-            queue.drainTo(kept)
-            var dropped = 0
-            for (m in kept) {
-                if (m.first == Proto.FRAME_VIDEO && !m.third) {
-                    dropped++
-                    continue
+        // 拥塞丢帧后，后续 P 帧参考的是已丢的帧——一直丢到下一个关键帧
+        if (dropUntilKey) {
+            if (type == Proto.FRAME_VIDEO && !isKey) return
+            if (type == Proto.FRAME_VIDEO) dropUntilKey = false
+        }
+        if (queue.offer(Triple(type, payload, isKey))) {
+            // 队列有空闲：缓慢把码率调回去（协议约定"慢慢回升"）
+            val now = SystemClock.elapsedRealtime()
+            if (bitrate < 6_000_000 && now - lastDropAt > 5000 && now - lastBumpAt > 1000) {
+                lastBumpAt = now
+                bitrate = minOf(6_000_000, bitrate + bitrate / 8)
+                try {
+                    encoder?.setParameters(
+                        Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) }
+                    )
+                } catch (_: Throwable) {
                 }
-                queue.offer(m)
             }
-            queue.offer(Triple(type, payload, isKey))
-            if (dropped > 0 && bitrate > 1_500_000) {
+            return
+        }
+        // congested: drop all non-key video frames, drop audio backlog, lower bitrate
+        val kept = ArrayList<Triple<Int, ByteArray, Boolean>>(QUEUE_CAP)
+        queue.drainTo(kept)
+        var dropped = 0
+        for (m in kept) {
+            if (m.first == Proto.FRAME_VIDEO && !m.third) {
+                dropped++
+                continue
+            }
+            queue.offer(m)
+        }
+        queue.offer(Triple(type, payload, isKey))
+        if (dropped > 0) {
+            dropUntilKey = true
+            lastDropAt = SystemClock.elapsedRealtime()
+            requestKeyframe() // 尽快补关键帧，恢复接收端解码基线
+            if (bitrate > 1_500_000) {
                 bitrate = (bitrate * 3) / 4
                 try {
                     encoder?.setParameters(
@@ -786,13 +863,15 @@ class MirrorService : Service() {
     private fun stopAll(reason: String?) {
         if (stopping) return
         stopping = true
-        reason?.let {
-            try {
-                conn?.sendControl(JSONObject().put("t", "stop").put("reason", it))
-            } catch (_: Throwable) {
-            }
-        }
         Thread {
+            // 主线程写 socket 会抛 NetworkOnMainThreadException 被吞掉，
+            // stop 帧发不出去（通知栏按钮、系统停止共享都走这条路）
+            reason?.let {
+                try {
+                    conn?.sendControl(JSONObject().put("t", "stop").put("reason", it))
+                } catch (_: Throwable) {
+                }
+            }
             SystemClock.sleep(150)
             conn?.close()
             conn = null

@@ -34,6 +34,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     private var cropRect: CGRect?
     private var srcW = 0
     private var srcH = 0
+    private var rkRot: UInt8 = 0 // ReplayKit 附件报的画面方向（与重力转正叠加）
     private var cmdPoll: DispatchSourceTimer?
 
     // ---------- 生命周期 ----------
@@ -89,9 +90,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
     private func connectHello() {
         guard let c = cfg else { return }
-        let fp = Data(base64Encoded: c.fpB64
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")) ?? Data()
+        let fp = Proto.b64d(c.fpB64) ?? Data()
         Conn.connect(host: c.host, port: c.port, fp: fp, timeout: 5) { [weak self] r in
             guard let self, !self.stopping else { return }
             switch r {
@@ -255,6 +254,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
     private func video(_ sb: CMSampleBuffer) {
         guard let src = CMSampleBufferGetImageBuffer(sb) else { return }
         srcW = CVPixelBufferGetWidth(src); srcH = CVPixelBufferGetHeight(src)
+        rkRot = rkOrientation(sb)
 
         frameN += 1
         if frameN % 20 == 0, let lum = FrameUtil.luma(src, ci: ci) {
@@ -275,6 +275,20 @@ final class SampleHandler: RPBroadcastSampleHandler {
         }
         enc.ensure(w: ew, h: eh)
         enc.encode(pb, pts: CMSampleBufferGetPresentationTimeStamp(sb))
+    }
+
+    /// ReplayKit 的方向附件（TIFF orientation）-> 接收端需顺时针转的 90° 个数。
+    /// 横屏 App 时缓冲仍是竖向尺寸、内容侧躺，靠这个字段让电脑端正过来。
+    /// （映射方向待真机验证：左/右两个档位若反了就把 1/3 对调）
+    private func rkOrientation(_ sb: CMSampleBuffer) -> UInt8 {
+        guard let n = CMGetAttachment(sb, key: RPVideoSampleOrientationKey as String,
+                                      attachmentModeOut: nil) as? NSNumber else { return 0 }
+        switch n.uint32Value {
+        case 1, 2: return 0    // up / upMirrored
+        case 3, 4: return 2    // down / downMirrored
+        case 5, 8: return 3    // left(Mirrored)：存的是转正图顺时针转的 → 逆时针转回
+        default: return 1      // 6,7 right(Mirrored)
+        }
     }
 
     private var poolW = 0
@@ -304,6 +318,7 @@ final class SampleHandler: RPBroadcastSampleHandler {
 
     private func sendVideo(_ au: Data, _ pts: UInt64, _ key: Bool) {
         conn?.send(Proto.frame(Proto.frameVideo,
-            Proto.videoPayload(ptsUs: pts, key: key, rotation: rot.field, au: au)))
+            Proto.videoPayload(ptsUs: pts, key: key,
+                               rotation: (rot.field &+ rkRot) % 4, au: au)))
     }
 }

@@ -13,6 +13,7 @@ export class MdnsAdvertiser {
       type: 'mp2tv',
       protocol: 'tcp',
       port,
+      disableIPv6: true,
       txt: { id: receiverId, v: String(PROTOCOL_VERSION) }
     })
   }

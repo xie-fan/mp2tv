@@ -45,7 +45,7 @@ mp2tv/
 
 | 端 | 技术 |
 |---|---|
-| 电脑端 | Electron 44, TypeScript, electron-vite, WebCodecs（H.264 硬解）, AudioWorklet（PCM 播放）, Node TLS, bonjour-service（mDNS）, safeStorage（凭据加密） |
+| 电脑端 | Electron 44, TypeScript, electron-vite, WebCodecs（H.264 硬解）, AudioWorklet（PCM 播放）, Node TLS, bonjour-service（mDNS） |
 | Android 手机端 | Kotlin, Android API 29+, CameraX + ML Kit（扫码）, Android Keystore（token 加密）, NSD（服务发现）, MediaProjection + MediaCodec（采集编码）, AudioPlaybackCapture（系统声音） |
 | iOS 手机端 | Swift 5.9, iOS 17+（采集需 iOS 27+）, ScreenCaptureKit + SCContentSharingPicker（采集授权）, VideoToolbox（H.264）, AVAudioConverter（48k s16le）, Keychain（token）, NWBrowser/NWConnection（mDNS + TLS）, ActivityKit + AppIntents（实时活动快捷按钮） |
 
@@ -162,7 +162,7 @@ node tools/fake-sender.mjs --device 2 stream ...
 ## 安全模型
 
 - 配对二维码**一次性**且 5 分钟过期，配对码在 TLS 通道内消费后即失效
-- 配对 token 电脑端用 `safeStorage` 加密落盘，手机端用 Android Keystore 加密
+- 配对 token 电脑端只存 SHA-256 哈希（原文不落盘），手机端用 Android Keystore 加密
 - 每次连接校验 TLS 证书指纹，指纹不匹配直接断开
 - 任一端解除配对后，对方 token 立即失效（`notPaired`）
 

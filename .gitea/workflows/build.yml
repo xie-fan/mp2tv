@@ -17,8 +17,9 @@ jobs:
         with:
           node-version: 24
 
+      # pnpm 版本由 windows/package.json 的 packageManager 字段锁定（corepack 自动解析）
       - name: Enable pnpm
-        run: corepack enable && corepack prepare pnpm@latest --activate
+        run: corepack enable
 
       - name: Install deps
         working-directory: windows
@@ -27,6 +28,10 @@ jobs:
       - name: Typecheck
         working-directory: windows
         run: pnpm typecheck
+
+      - name: Unit test (SPS Annex-B helpers)
+        working-directory: windows
+        run: node --experimental-transform-types --test src/renderer/mirror/sps.test.mts
 
       - name: Build
         working-directory: windows

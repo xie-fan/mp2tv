@@ -12,8 +12,17 @@ import { FRAME_VIDEO } from './protocol'
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
 
+// portable builds unpack to a temp dir — register the outer exe, not the
+// (deleted-after-exit) temp path; and only packaged builds may autostart
+function applyAutostart(enabled: boolean): void {
+  const portable = process.env.PORTABLE_EXECUTABLE_FILE
+  app.setLoginItemSettings({
+    openAtLogin: enabled && app.isPackaged,
+    ...(portable ? { path: portable } : {})
+  })
+}
+
 const gotLock = app.requestSingleInstanceLock()
-if (!gotLock) app.quit()
 
 let identity: Identity
 let store: Store
@@ -100,7 +109,11 @@ function createMirrorWindow(senderName: string): void {
     mirrorWin?.show()
     mirrorWin?.focus()
   })
-  mirrorWin.on('closed', () => {
+  const win = mirrorWin
+  win.on('closed', () => {
+    // a newer mirror window may already have replaced this one — only end the
+    // session when OUR window was still the active mirror
+    if (mirrorWin !== win) return
     mirrorWin = null
     if (sleepBlockerId !== null) {
       powerSaveBlocker.stop(sleepBlockerId)
@@ -212,17 +225,9 @@ async function main(): Promise<void> {
     server.removeDevice(senderId)
     return store.listDevices()
   })
-  ipcMain.handle('device:rename', (_e, senderId: string, name: string) => {
-    const dev = store.listDevices().find((d) => d.senderId === senderId)
-    if (dev && name.trim()) {
-      dev.name = name.trim()
-      store.addDevice(dev)
-    }
-    return store.listDevices()
-  })
   ipcMain.handle('settings:set', (_e, patch: { displayId?: string | null; autostart?: boolean }) => {
     const s = store.setSettings(patch)
-    if (patch.autostart !== undefined) app.setLoginItemSettings({ openAtLogin: s.autostart })
+    if (patch.autostart !== undefined) applyAutostart(s.autostart)
     return s
   })
   ipcMain.handle('logs:export', async () => {
@@ -275,7 +280,10 @@ async function main(): Promise<void> {
   ipcMain.handle('window:closeMirror', () => mirrorWin?.close())
 
   // autostart from saved settings
-  app.setLoginItemSettings({ openAtLogin: store.getSettings().autostart })
+  applyAutostart(store.getSettings().autostart)
+
+  // no default menu: Ctrl+R reload would silently kill the mirror window
+  Menu.setApplicationMenu(null)
 
   createMainWindow()
 
@@ -283,7 +291,7 @@ async function main(): Promise<void> {
   tray.setToolTip('mp2tv')
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: '打开 mp2tv', click: () => mainWin?.show() ?? createMainWindow() },
+      { label: '打开 mp2tv', click: () => (mainWin ? mainWin.show() : createMainWindow()) },
       { type: 'separator' },
       {
         label: '退出',
@@ -294,7 +302,7 @@ async function main(): Promise<void> {
       }
     ])
   )
-  tray.on('click', () => mainWin?.show() ?? createMainWindow())
+  tray.on('click', () => (mainWin ? mainWin.show() : createMainWindow()))
 
   // QR expires after 5 min — push a fresh one periodically so an open main window stays valid
   setInterval(() => {
@@ -306,15 +314,19 @@ async function main(): Promise<void> {
   })
 }
 
-app.on('before-quit', () => {
-  quitting = true
-  server?.stop()
-  mdns.stop()
-})
-
-app.on('second-instance', () => mainWin?.show())
-
-main().catch((e) => {
-  console.error(e)
+if (!gotLock) {
   app.quit()
-})
+} else {
+  app.on('before-quit', () => {
+    quitting = true
+    server?.stop()
+    mdns.stop()
+  })
+
+  app.on('second-instance', () => mainWin?.show())
+
+  main().catch((e) => {
+    console.error(e)
+    app.quit()
+  })
+}

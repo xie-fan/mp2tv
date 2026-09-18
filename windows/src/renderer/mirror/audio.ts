@@ -8,12 +8,15 @@ class PcmPlayer extends AudioWorkletProcessor {
     super()
     this.q = []
     this.qLen = 0
-    this.played = 0
+    // pts (us) of the sample currently leaving the speakers; advances even
+    // while underrun silence is emitted so the video clock stays sane
+    this.nowPts = -1
     this.port.onmessage = (e) => {
       const m = e.data
       if (m.clear) {
         this.q = []
         this.qLen = 0
+        this.nowPts = -1
         return
       }
       this.q.push(m)
@@ -37,15 +40,16 @@ class PcmPlayer extends AudioWorkletProcessor {
         out[ch].set(src.subarray(head.off, head.off + take), i)
       }
       head.off += take
-      this.played += take
       this.qLen -= take
       i += take
+      this.nowPts = head.ptsUs + (head.off / 48000) * 1e6
       if (head.off >= head.frames) this.q.shift()
     }
     if (i < n) {
       for (const ch of out) ch.fill(0, i)
+      if (this.nowPts >= 0) this.nowPts += ((n - i) / 48000) * 1e6
     }
-    this.port.postMessage({ played: this.played, queued: this.qLen })
+    this.port.postMessage({ pts: this.nowPts, queued: this.qLen })
     return true
   }
 }
@@ -56,8 +60,7 @@ export class PcmPlayer {
   private ctx: AudioContext | null = null
   private gain: GainNode | null = null
   private node: AudioWorkletNode | null = null
-  private firstPts = -1
-  private played = 0
+  private nowPts = -1
   private muted = false
 
   async init(): Promise<void> {
@@ -73,7 +76,7 @@ export class PcmPlayer {
       outputChannelCount: [2]
     })
     this.node.port.onmessage = (e) => {
-      this.played = e.data.played
+      this.nowPts = e.data.pts
     }
     this.node.connect(this.gain).connect(this.ctx.destination)
     if (this.muted) this.gain.gain.value = 0
@@ -82,7 +85,6 @@ export class PcmPlayer {
   /** pts in microseconds, data = s16le interleaved stereo */
   feed(ptsUs: number, data: Uint8Array): void {
     if (!this.node) return
-    if (this.firstPts < 0) this.firstPts = ptsUs
     const frames = data.byteLength >> 2
     // IPC payloads can sit at odd byte offsets; copy to a fresh aligned buffer
     const i16 = new Int16Array(data.slice().buffer, 0, frames * 2)
@@ -92,17 +94,16 @@ export class PcmPlayer {
       l[i] = i16[i * 2] / 32768
       r[i] = i16[i * 2 + 1] / 32768
     }
-    this.node.port.postMessage({ data: [l, r], frames, off: 0 }, [l.buffer, r.buffer])
+    this.node.port.postMessage({ data: [l, r], frames, off: 0, ptsUs }, [l.buffer, r.buffer])
   }
 
   /** pts of the sample currently leaving the speakers, or null before audio starts */
   playedPts(): number | null {
-    if (this.firstPts < 0) return null
-    return this.firstPts + (this.played / 48000) * 1e6
+    return this.nowPts >= 0 ? this.nowPts : null
   }
 
   diag(): string {
-    return `ctx=${this.ctx?.state} firstPts=${this.firstPts} played=${this.played}`
+    return `ctx=${this.ctx?.state} nowPts=${this.nowPts.toFixed(0)}`
   }
 
   setMuted(m: boolean): void {
@@ -111,8 +112,7 @@ export class PcmPlayer {
   }
 
   reset(): void {
-    this.firstPts = -1
-    this.played = 0
+    this.nowPts = -1
     this.node?.port.postMessage({ clear: true })
   }
 

@@ -12,6 +12,8 @@ final class Discovery {
 
     var onChange: ([String: Found]) -> Void = { _ in }
     private var browser: NWBrowser?
+    // 串行队列：browse 回调和 resolve 回调都改 found，并发队列会踩字典
+    private let q = DispatchQueue(label: "mp2tv.discovery")
     private var found: [String: Found] = [:] {
         didSet { onChange(found) }
     }
@@ -35,7 +37,7 @@ final class Discovery {
             }
             self.found = self.found.filter { seen.contains($0.key) }
         }
-        b.start(queue: .global())
+        b.start(queue: q)
         browser = b
     }
 
@@ -49,7 +51,7 @@ final class Discovery {
                 c.cancel()
             }
         }
-        c.start(queue: .global())
+        c.start(queue: q)
     }
 
     func stop() { browser?.cancel(); browser = nil }

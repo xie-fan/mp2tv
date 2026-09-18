@@ -84,7 +84,8 @@ enum FrameUtil {
         guard let out else { return nil }
         let sw = CGFloat(CVPixelBufferGetWidth(src))
         let sh = CGFloat(CVPixelBufferGetHeight(src))
-        let px = CGRect(x: r.minX * sw, y: r.minY * sh,
+        // 归一化 rect 是左上角原点；CIImage 是左下角原点——y 要翻转
+        let px = CGRect(x: r.minX * sw, y: (1 - r.maxY) * sh,
                         width: r.width * sw, height: r.height * sh)
         let img = CIImage(cvPixelBuffer: src).cropped(to: px)
             .transformed(by: CGAffineTransform(translationX: -px.minX, y: -px.minY))
