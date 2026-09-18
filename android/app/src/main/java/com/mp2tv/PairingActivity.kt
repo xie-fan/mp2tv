@@ -45,6 +45,15 @@ class PairingActivity : ComponentActivity() {
         )
         setContentView(root)
 
+        // 深链/手动入口：mp2tv://pair?... 直接配对，不启动相机
+        val deepLink = intent?.data?.toString()
+        if (deepLink != null && deepLink.startsWith("mp2tv://pair")) {
+            handling = true
+            status.text = "正在配对…"
+            doPair(deepLink)
+            return
+        }
+
         ProcessCameraProvider.getInstance(this).addListener({
             val provider = ProcessCameraProvider.getInstance(this).get()
             val p = Preview.Builder().build().also {
@@ -174,6 +183,7 @@ class PairingActivity : ComponentActivity() {
     }
 
     private fun fail(msg: String) {
+        L.i("pair fail: $msg")
         runOnUiThread {
             status.text = "$msg\n（对准二维码重试）"
             status.postDelayed({ handling = false }, 1200)

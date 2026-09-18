@@ -116,6 +116,10 @@ class MirrorService : Service() {
     private var gravHoldSign = 0
     private var sensorMgr: SensorManager? = null
 
+    private var vdW = 0
+    private var vdH = 0 // VD 缓冲尺寸：会话内固定，物理转屏后不随 targetSize 变化
+    private var encW = 0
+    private var encH = 0
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioManager: AudioManager? = null
     private var prevVolume = -1
@@ -127,6 +131,11 @@ class MirrorService : Service() {
             if (id != Display.DEFAULT_DISPLAY) return
             val r = currentRotation()
             if (lastRotation != -1 && r != lastRotation) {
+                // 物理转屏：VD 尺寸不变，系统把新方向画面信箱化进旧缓冲。
+                // 旧截取区域必然失效，回全幅让检测器重新找条带。
+                appliedCrop = null
+                pendingRect = null
+                pendingCount = 0
                 handler.postDelayed({ rebuildCapture() }, 300)
             }
             lastRotation = r
@@ -484,33 +493,13 @@ class MirrorService : Service() {
 
     @Synchronized
     private fun startCapture() {
-        stopEncoder()
         val (sw, sh) = targetSize()
-        // encoder dims = content area in stream pixels (even, ≥64)
-        val crop = if (cropEnabled) appliedCrop else null
-        var w = if (crop == null) sw else (sw * (crop.r - crop.l)).toInt()
-        var h = if (crop == null) sh else (sh * (crop.b - crop.t)).toInt()
-        w = maxOf(64, w / 2 * 2)
-        h = maxOf(64, h / 2 * 2)
-        L.i("capture screen=${sw}x$sh enc=${w}x$h crop=$crop rot=$lastRotation")
-        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, 60)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
-            setInteger(MediaFormat.KEY_PRIORITY, 0)
-            setInteger(MediaFormat.KEY_LATENCY, 0)
-        }
-        val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-        enc.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val encSurface: Surface = enc.createInputSurface()
-        enc.start()
-        encoder = enc
 
         // Android 14+：同一 MediaProjection 只允许 createVirtualDisplay 一次，
-        // 因此 VD + GL 桥整个会话只建一次；重建只换编码器输出面（setTarget）。
+        // VD + GL 桥整个会话只建一次，尺寸固定为创建时的屏幕尺寸。
         var pipe = glPipe
         if (pipe == null || vd == null) {
+            vdW = sw; vdH = sh
             pipe = GlPipe(sw, sh)
             pipe.sampleListener = object : GlPipe.SampleListener {
                 override fun onSample(rgba: ByteArray, w: Int, h: Int) = onScreenSample(rgba, w, h)
@@ -524,7 +513,48 @@ class MirrorService : Service() {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 pipe.inputSurface, null, handler
             )
+            L.i("VD created ${vdW}x${vdH}")
         }
+
+        // encoder dims = 内容区域 × VD 缓冲尺寸（裁剪比例作用在 VD 坐标系；
+        // 不能用 targetSize——物理转屏后 VD 尺寸不变，会算出畸形尺寸）
+        val crop = if (cropEnabled) appliedCrop else null
+        var w = if (crop == null) vdW else (vdW * (crop.r - crop.l)).toInt()
+        var h = if (crop == null) vdH else (vdH * (crop.b - crop.t)).toInt()
+        w = maxOf(64, w / 2 * 2)
+        h = maxOf(64, h / 2 * 2)
+        L.i("capture screen=${sw}x$sh vd=${vdW}x$vdH enc=${w}x$h crop=$crop rot=$lastRotation")
+        val fmt = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, w, h).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+            setInteger(MediaFormat.KEY_FRAME_RATE, 60)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
+            setInteger(MediaFormat.KEY_PRIORITY, 0)
+            setInteger(MediaFormat.KEY_LATENCY, 0)
+        }
+        // 先建好新编码器再换旧的：start 失败保留旧管线，不至于断流/闪退
+        val enc = try {
+            MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).also {
+                it.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
+        } catch (e: Throwable) {
+            L.i("encoder create/configure failed, keep old: $e")
+            return
+        }
+        val encSurface = enc.createInputSurface()
+        try {
+            enc.start()
+        } catch (e: Throwable) {
+            L.i("encoder start failed, keep old: $e")
+            try {
+                enc.release()
+            } catch (_: Throwable) {
+            }
+            return
+        }
+        stopEncoder()
+        encoder = enc
+        encW = w; encH = h
         pipe.setTarget(encSurface)
         if (crop != null) pipe.setCrop(crop.l, crop.t, crop.r, crop.b)
         else pipe.setCrop(0f, 0f, 1f, 1f)
@@ -532,11 +562,13 @@ class MirrorService : Service() {
         if (audioThread == null) startAudio()
     }
 
-    /** 黑边检测回调（GL 线程）：稳定 ~1s 的新内容区域才会生效（重建编码器） */
+    /** 黑边检测回调（GL 线程）：稳定 ~1s 的新内容区域才会生效（重建编码器或仅换裁剪位） */
     private fun onScreenSample(rgba: ByteArray, w: Int, h: Int) {
         val r = ContentDetect.detect(rgba, w, h) ?: return // 暗场：保持现状
         latestDetected = r
         if (!cropEnabled) return
+        // 退化矩形不采信（横屏信箱条带约占 18% 面积，阈值不能再高）
+        if ((r.r - r.l) * (r.b - r.t) < 0.08f) return
         val pend = pendingRect
         if (pend != null && r.similar(pend)) pendingCount++
         else {
@@ -546,20 +578,33 @@ class MirrorService : Service() {
         val applied = appliedCrop
         val changed = if (applied == null) !r.isFull() else !applied.similar(r, 0.02f)
         if (changed && pendingCount >= 3 &&
-            SystemClock.elapsedRealtime() - lastCropApply > 2000
+            SystemClock.elapsedRealtime() - lastCropApply > 3000
         ) {
             L.i("content rect -> ${r.l},${r.t} ${r.r}x${r.b}")
             appliedCrop = r
             pendingCount = 0
             lastCropApply = SystemClock.elapsedRealtime()
-            handler.post { rebuildCapture() }
+            handler.post { applyCrop(r) }
+        }
+    }
+
+    /** 新内容区域生效：尺寸不变只改 GL 裁剪位，尺寸变了才重建编码器 */
+    @Synchronized
+    private fun applyCrop(r: ContentDetect.Rect) {
+        if (stopping || conn == null) return
+        val nw = maxOf(64, (vdW * (r.r - r.l)).toInt() / 2 * 2)
+        val nh = maxOf(64, (vdH * (r.b - r.t)).toInt() / 2 * 2)
+        if (nw == encW && nh == encH) {
+            glPipe?.setCrop(r.l, r.t, r.r, r.b)
+        } else {
+            rebuildCapture()
         }
     }
 
     @Synchronized
     private fun rebuildCapture() {
         if (stopping || conn == null) return
-        L.i("rotation changed -> rebuild capture")
+        L.i("rebuild capture")
         startCapture()
     }
 

@@ -151,8 +151,8 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (online[d.receiverId] == null) {
-            toast("电脑不在线")
-            return
+            // mDNS 可能发现不到（模拟器 NAT、禁 mDNS 的网络），仍尝试直连已存地址
+            toast("电脑不在线，尝试直连…")
         }
         pendingMirror = d
         val need = mutableListOf(Manifest.permission.RECORD_AUDIO)

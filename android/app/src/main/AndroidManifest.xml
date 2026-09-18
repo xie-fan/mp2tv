@@ -28,7 +28,15 @@
         </activity>
         <activity
             android:name=".PairingActivity"
-            android:exported="false" />
+            android:exported="true">
+            <!-- 深链配对：mp2tv://pair?... -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mp2tv" android:host="pair" />
+            </intent-filter>
+        </activity>
         <service
             android:name=".MirrorService"
             android:exported="false"
